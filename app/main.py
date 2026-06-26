@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response, status
+
+from . import catalog, converter
+from .config import settings
+
+app = FastAPI(title="tjarepo")
+
+
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    if not settings.api_token:
+        return
+    if authorization != f"Bearer {settings.api_token}":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/tjarepo/songs/categories", dependencies=[Depends(require_token)])
+def categories() -> dict[str, object]:
+    return {"categories": catalog.categories()}
+
+
+@app.get("/api/tjarepo/songs", dependencies=[Depends(require_token)])
+def songs(category: str | None = None, offset: int = 0, limit: int = 48) -> dict[str, object]:
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+    entries = catalog.songs(category)
+    return {
+        "songs": [catalog.public_song(s) for s in entries[offset:offset + limit]],
+        "total": len(entries),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+@app.get("/api/tjarepo/songs/{song_id}", dependencies=[Depends(require_token)])
+def show_song(song_id: str) -> dict[str, object]:
+    entry = catalog.song(song_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Song not found")
+    return catalog.public_song(entry)
+
+
+@app.post("/api/tjarepo/songs/{song_id}/prepare", dependencies=[Depends(require_token)])
+def prepare(song_id: str, background_tasks: BackgroundTasks) -> Response:
+    data = converter.prepare(song_id)
+    if data.get("status") == "queued":
+        background_tasks.add_task(converter.convert, song_id)
+    code = {
+        "ready": 200,
+        "queued": 202,
+        "processing": 202,
+        "not_found": 404,
+        "failed": 500,
+    }.get(str(data.get("status")), 500)
+    return _json(data, code)
+
+
+@app.get("/api/tjarepo/conversions/{song_id}", dependencies=[Depends(require_token)])
+def conversion_status(song_id: str) -> Response:
+    data = converter.status_for(song_id)
+    return _json(data, 404 if data.get("status") == "not_found" else 200)
+
+
+@app.get("/api/tjarepo/conversions/{song_id}/assets/{asset_path:path}", dependencies=[Depends(require_token)])
+def asset(song_id: str, asset_path: str, request: Request) -> Response:
+    item = converter.asset(song_id, asset_path)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = Path(item["path"])
+    size = path.stat().st_size
+    max_length = max(1, settings.asset_chunk_bytes)
+    offset = max(0, int(request.query_params.get("offset", "0")))
+    length = min(max_length, max(1, int(request.query_params.get("length", str(max_length)))))
+    if offset >= size:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "X-Asset-Size": str(size)})
+    length = min(length, size - offset)
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        body = fh.read(length)
+    return Response(
+        body,
+        status_code=200 if offset == 0 and len(body) == size else 206,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Length": str(len(body)),
+            "Content-Range": f"bytes {offset}-{offset + len(body) - 1}/{size}",
+            "X-Asset-Name": asset_path,
+            "X-Asset-Size": str(size),
+            "X-Asset-Sha1": str(item["sha1"]),
+            "X-Chunk-Offset": str(offset),
+        },
+    )
+
+
+def _json(data: dict[str, object], code: int) -> Response:
+    import json
+
+    return Response(
+        json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+        status_code=code,
+        media_type="application/json",
+    )
