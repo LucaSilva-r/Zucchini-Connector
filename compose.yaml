@@ -4,31 +4,22 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${TJAREPO_PORT:-8090}:8090"
+      - "${TJAREPO_HTTPS_PORT:-8443}:8090"
     environment:
       TJAREPO_ESE_ROOT: /data/ESE
       TJAREPO_CONVERT_ROOT: /app/storage/ESE-convert
       TJAREPO_PS3_AT3TOOL_PATH: /opt/ps3_at3tool.exe
       TJAREPO_API_TOKEN: "${TJAREPO_API_TOKEN:-}"
       TJAREPO_AT3_BITRATE_KBPS: "${TJAREPO_AT3_BITRATE_KBPS:-256}"
+      TJAREPO_TLS_ENABLED: "${TJAREPO_TLS_ENABLED:-1}"
+      TJAREPO_TLS_CN: "${TJAREPO_TLS_CN:-tjarepo.local}"
+      TJAREPO_TLS_DAYS: "${TJAREPO_TLS_DAYS:-3650}"
       PYTHONPATH: /app/app
       WINEPREFIX: /tmp/wineprefix
       WINEDEBUG: -all
     volumes:
       - ./storage/ESE:/data/ESE:ro
       - ./storage/ESE-convert:/app/storage/ESE-convert
+      - ./storage/certificates:/app/storage/certificates
       - ./storage/ps3_at3tool.exe:/opt/ps3_at3tool.exe:ro
-    restart: unless-stopped
-
-  tls-proxy:
-    build:
-      context: ./docker/tls-proxy
-      dockerfile: Dockerfile
-    ports:
-      - "${TJAREPO_HTTPS_PORT:-8443}:443"
-    environment:
-      TJAREPO_TLS_CN: "${TJAREPO_TLS_CN:-tjarepo.local}"
-      TJAREPO_TLS_DAYS: "${TJAREPO_TLS_DAYS:-3650}"
-    depends_on:
-      - tjarepo
     restart: unless-stopped
