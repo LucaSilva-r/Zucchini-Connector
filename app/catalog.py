@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from .config import settings
@@ -22,6 +25,14 @@ COURSE_MAP = {
     "edit": ("x", "Ura"),
     "ura": ("x", "Ura"),
 }
+
+# Canonical difficulty order (Easy..Ura) for the flat "diffs" index string.
+_DIFF_ORDER = ("e", "n", "h", "m", "x")
+
+_SONG_INDEX_TTL_SECONDS = 60.0
+_SONG_INDEX_LOCK = RLock()
+_SONG_INDEX: dict[str, dict[str, Any]] = {}
+_SONG_INDEX_AT = 0.0
 
 
 def categories() -> list[dict[str, Any]]:
@@ -64,23 +75,98 @@ def songs(category: str | None = None) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
         for entry in categories():
             merged.extend(songs(str(entry["id"])))
-        return sorted(merged, key=lambda s: str(s["title"]).casefold())
+        result = sorted(merged, key=lambda s: str(s["title"]).casefold())
+        _remember_songs(result)
+        return result
 
     if category == "root":
         candidates = [p for p in root.iterdir() if p.is_dir() and not re.match(r"^\d{2} ", p.name)]
-        return _songs_from_dirs(candidates, "root")
+        result = _songs_from_dirs(candidates, "root")
+        _remember_songs(result)
+        return result
 
     base = _safe_path(category)
     if base is None or not base.is_dir():
         return []
-    return _songs_from_dirs([p for p in base.iterdir() if p.is_dir()], category)
+    result = _songs_from_dirs([p for p in base.iterdir() if p.is_dir()], category)
+    _remember_songs(result)
+    return result
+
+
+def library() -> dict[str, Any]:
+    """Whole library in one payload (categories + songs id/title/category) with
+    a content hash. The PS3 caches this and only re-downloads when the hash
+    changes, so it never pages the server during navigation."""
+    cats = categories()
+    cat_out = [
+        {"id": c["id"], "title": c["title"], "song_count": c["song_count"]}
+        for c in cats
+    ]
+    song_out: list[dict[str, str]] = []
+    for c in cats:
+        for s in songs(str(c["id"])):
+            song_out.append(
+                {
+                    "id": s["id"],
+                    "title": s["title"],
+                    # Always present (even "") so the PS3's forward-scan parser
+                    # never grabs a neighbouring song's subtitle.
+                    "subtitle": s.get("subtitle") or "",
+                    "category": str(c["id"]),
+                    # Flat "id:stars,..." in canonical order so the PS3 gets star
+                    # counts straight from the index — no per-song conversion.
+                    "diffs": _diffs_str(s.get("courses") or []),
+                }
+            )
+    payload = {"categories": cat_out, "songs": song_out}
+    h = hashlib.sha1(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {"hash": h, **payload}
+
+
+def _diffs_str(courses: list[dict[str, Any]]) -> str:
+    stars = {str(c.get("id")): int(c.get("stars") or 0) for c in courses}
+    return ",".join(f"{d}:{stars[d]}" for d in _DIFF_ORDER if d in stars)
+
+
+def library_hash() -> str:
+    return library()["hash"]
 
 
 def song(song_id: str) -> dict[str, Any] | None:
-    for entry in songs():
-        if entry["id"] == song_id:
-            return entry
-    return None
+    cached = _SONG_INDEX.get(song_id)
+    if cached is not None:
+        return cached
+
+    now = time.monotonic()
+    global _SONG_INDEX_AT
+    if now - _SONG_INDEX_AT > _SONG_INDEX_TTL_SECONDS:
+        with _SONG_INDEX_LOCK:
+            now = time.monotonic()
+            if now - _SONG_INDEX_AT > _SONG_INDEX_TTL_SECONDS:
+                _SONG_INDEX.clear()
+                _SONG_INDEX.update({entry["id"]: entry for entry in songs()})
+                _SONG_INDEX_AT = now
+    return _SONG_INDEX.get(song_id)
+
+
+def warm_song_index() -> int:
+    entries = songs()
+    global _SONG_INDEX_AT
+    with _SONG_INDEX_LOCK:
+        _SONG_INDEX.clear()
+        _SONG_INDEX.update({entry["id"]: entry for entry in entries})
+        _SONG_INDEX_AT = time.monotonic()
+    return len(_SONG_INDEX)
+
+
+def _remember_songs(entries: list[dict[str, Any]]) -> None:
+    if not entries:
+        return
+    with _SONG_INDEX_LOCK:
+        for entry in entries:
+            _SONG_INDEX[str(entry["id"])] = entry
 
 
 def source_hash(entry: dict[str, Any]) -> str:
@@ -105,6 +191,13 @@ def public_song(entry: dict[str, Any]) -> dict[str, Any]:
     out = dict(entry)
     out.pop("tja_path", None)
     out.pop("audio_path", None)
+    song_id = str(out.get("id", ""))
+    out["title_images"] = {
+        "hshort": f"/api/tjarepo/songs/{song_id}/title/hshort.png",
+        "hlong": f"/api/tjarepo/songs/{song_id}/title/hlong.png",
+        "vshort": f"/api/tjarepo/songs/{song_id}/title/vshort.png",
+        "vlong": f"/api/tjarepo/songs/{song_id}/title/vlong.png",
+    }
     return out
 
 

@@ -8,6 +8,7 @@ services:
     environment:
       TJAREPO_ESE_ROOT: /data/ESE
       TJAREPO_CONVERT_ROOT: /app/storage/ESE-convert
+      TJAREPO_TITLE_CACHE_ROOT: /app/storage/title-cache
       TJAREPO_PS3_AT3TOOL_PATH: /opt/ps3_at3tool.exe
       TJAREPO_API_TOKEN: "${TJAREPO_API_TOKEN:-}"
       TJAREPO_AT3_BITRATE_KBPS: "${TJAREPO_AT3_BITRATE_KBPS:-256}"
@@ -20,6 +21,7 @@ services:
     volumes:
       - ./storage/ESE:/data/ESE:ro
       - ./storage/ESE-convert:/app/storage/ESE-convert
+      - ./storage/title-cache:/app/storage/title-cache
       - ./storage/certificates:/app/storage/certificates
       - ./storage/ps3_at3tool.exe:/opt/ps3_at3tool.exe:ro
     restart: unless-stopped

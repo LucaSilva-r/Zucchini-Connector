@@ -3,11 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
 
 from . import catalog, converter
 from .config import settings
+from .titlegen.cache import title_argb, title_image
 
 app = FastAPI(title="tjarepo")
+
+
+@app.on_event("startup")
+def startup() -> None:
+    count = catalog.warm_song_index()
+    print(f"[tjarepo] indexed {count} songs", flush=True)
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
@@ -27,13 +35,24 @@ def categories() -> dict[str, object]:
     return {"categories": catalog.categories()}
 
 
+@app.get("/api/tjarepo/library", dependencies=[Depends(require_token)])
+def library() -> dict[str, object]:
+    return catalog.library()
+
+
+@app.get("/api/tjarepo/library/hash", dependencies=[Depends(require_token)])
+def library_hash() -> dict[str, str]:
+    return {"hash": catalog.library_hash()}
+
+
 @app.get("/api/tjarepo/songs", dependencies=[Depends(require_token)])
 def songs(category: str | None = None, offset: int = 0, limit: int = 48) -> dict[str, object]:
     limit = max(1, min(200, limit))
     offset = max(0, offset)
     entries = catalog.songs(category)
+    page = entries[offset:offset + limit]
     return {
-        "songs": [catalog.public_song(s) for s in entries[offset:offset + limit]],
+        "songs": [catalog.public_song(s) for s in page],
         "total": len(entries),
         "offset": offset,
         "limit": limit,
@@ -46,6 +65,42 @@ def show_song(song_id: str) -> dict[str, object]:
     if entry is None:
         raise HTTPException(status_code=404, detail="Song not found")
     return catalog.public_song(entry)
+
+
+@app.get("/api/tjarepo/songs/{song_id}/hash", dependencies=[Depends(require_token)])
+def song_hash(song_id: str) -> dict[str, str]:
+    """Cheap freshness check: the same source_hash the prepared manifest stores,
+    so the PS3 can reuse its local cache when it matches and only re-download
+    when the source files changed."""
+    entry = catalog.song(song_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Song not found")
+    return {"source_hash": catalog.source_hash(entry)}
+
+
+@app.get("/api/tjarepo/songs/{song_id}/title/{variant}.png", dependencies=[Depends(require_token)])
+def song_title_image(song_id: str, variant: str) -> FileResponse:
+    path = title_image(song_id, variant)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Title image not found")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.get("/api/tjarepo/songs/{song_id}/title/{variant}.argb", dependencies=[Depends(require_token)])
+def song_title_argb(song_id: str, variant: str) -> FileResponse:
+    item = title_argb(song_id, variant)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Title image not found")
+    path, width, height = item
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        headers={
+            "X-Title-Width": str(width),
+            "X-Title-Height": str(height),
+            "X-Title-Format": "A8R8G8B8",
+        },
+    )
 
 
 @app.post("/api/tjarepo/songs/{song_id}/prepare", dependencies=[Depends(require_token)])

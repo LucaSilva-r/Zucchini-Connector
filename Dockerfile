@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY app /app/app
 COPY docker/tjarepo-entrypoint.sh /usr/local/bin/tjarepo-entrypoint
 RUN chmod +x /usr/local/bin/tjarepo-entrypoint
-RUN mkdir -p /app/storage/ESE-convert
+RUN mkdir -p /app/storage/ESE-convert /app/storage/title-cache
 
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/tjarepo-entrypoint"]
