@@ -3,6 +3,13 @@ set -eu
 
 tls_enabled="${TJAREPO_TLS_ENABLED:-1}"
 
+# All conversion workers share this prefix. Initialize it once here so the
+# first batch cannot race several Wine prefix initializations against itself.
+if [ -n "${WINEPREFIX:-}" ] && [ ! -d "$WINEPREFIX/drive_c" ]; then
+    wineboot -u >/dev/null 2>&1 || true
+    wineserver -w >/dev/null 2>&1 || true
+fi
+
 if [ "$tls_enabled" != "0" ] && [ "$tls_enabled" != "false" ]; then
     cert_dir="${TJAREPO_TLS_CERT_DIR:-/app/storage/certificates/local}"
     cert_path="${TJAREPO_TLS_CERT_FILE:-$cert_dir/server.crt}"

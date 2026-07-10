@@ -7,8 +7,10 @@ import shutil
 import struct
 import subprocess
 import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from tja2fumen.constants import COURSE_IDS
@@ -21,6 +23,91 @@ from .config import settings
 
 
 COURSE_NAME_BY_ID = {value: key for key, value in COURSE_IDS.items()}
+
+_CONVERSION_POOL = ThreadPoolExecutor(
+    max_workers=settings.conversion_workers,
+    thread_name_prefix="tjarepo-convert",
+)
+_CONVERSION_FUTURES: dict[str, Future[None]] = {}
+_CONVERSION_LOCK = RLock()
+
+
+def enqueue(song_id: str) -> dict[str, Any]:
+    """Prepare a song and ensure at most one conversion is running for it."""
+    with _CONVERSION_LOCK:
+        future = _CONVERSION_FUTURES.get(song_id)
+    if future is not None and not future.done():
+        return status_for(song_id)
+
+    with _CONVERSION_LOCK:
+        data = prepare(song_id)
+        state = str(data.get("status", ""))
+        future = _CONVERSION_FUTURES.get(song_id)
+        if state in {"queued", "processing"} and (
+            future is None or future.done()
+        ):
+            future = _CONVERSION_POOL.submit(convert, song_id)
+            _CONVERSION_FUTURES[song_id] = future
+            _add_done_callback(song_id, future)
+        return data
+
+
+def enqueue_many(song_ids: list[str]) -> dict[str, int | str]:
+    seen: set[str] = set()
+    scheduled = 0
+    already_scheduled = 0
+    not_found = 0
+
+    for song_id in song_ids:
+        if song_id in seen:
+            continue
+        seen.add(song_id)
+        if catalog.song(song_id) is None:
+            not_found += 1
+            continue
+
+        with _CONVERSION_LOCK:
+            future = _CONVERSION_FUTURES.get(song_id)
+            if future is not None and not future.done():
+                already_scheduled += 1
+                continue
+            future = _CONVERSION_POOL.submit(_convert_if_needed, song_id)
+            _CONVERSION_FUTURES[song_id] = future
+            _add_done_callback(song_id, future)
+            scheduled += 1
+
+    return {
+        "status": "accepted",
+        "requested": len(song_ids),
+        "accepted": len(seen),
+        "scheduled": scheduled,
+        "already_scheduled": already_scheduled,
+        "not_found": not_found,
+    }
+
+
+def shutdown() -> None:
+    _CONVERSION_POOL.shutdown(wait=False, cancel_futures=True)
+
+
+def _conversion_done(song_id: str, future: Future[None]) -> None:
+    with _CONVERSION_LOCK:
+        if _CONVERSION_FUTURES.get(song_id) is future:
+            del _CONVERSION_FUTURES[song_id]
+
+
+def _add_done_callback(song_id: str, future: Future[None]) -> None:
+    future.add_done_callback(
+        lambda completed, queued_id=song_id: _conversion_done(
+            queued_id, completed
+        )
+    )
+
+
+def _convert_if_needed(song_id: str) -> None:
+    data = prepare(song_id)
+    if data.get("status") in {"queued", "processing"}:
+        convert(song_id)
 
 
 def prepare(song_id: str) -> dict[str, Any]:

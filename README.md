@@ -27,6 +27,11 @@ The `tja2fumen` converter is vendored in `app/tja2fumen`.
 
 Set `TJAREPO_API_TOKEN` to require `Authorization: Bearer <token>`.
 
+Batch conversion uses a bounded worker pool so several queued songs can be
+prepared in parallel while clients download assets sequentially. Set
+`TJAREPO_CONVERSION_WORKERS` to control concurrency (default: `4` in Docker,
+or up to `4` based on detected CPUs outside Docker).
+
 The FastAPI app serves HTTPS directly on `TJAREPO_HTTPS_PORT` (`8443` by
 default), so it does not conflict with TaikOnline's local `443`. The container
 generates a self-signed certificate on first start and stores it under

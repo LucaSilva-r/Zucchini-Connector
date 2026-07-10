@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 
 from . import catalog, converter
@@ -15,7 +15,16 @@ app = FastAPI(title="tjarepo")
 @app.on_event("startup")
 def startup() -> None:
     count = catalog.warm_song_index()
-    print(f"[tjarepo] indexed {count} songs", flush=True)
+    print(
+        f"[tjarepo] indexed {count} songs; "
+        f"conversion workers={settings.conversion_workers}",
+        flush=True,
+    )
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    converter.shutdown()
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
@@ -103,11 +112,18 @@ def song_title_argb(song_id: str, variant: str) -> FileResponse:
     )
 
 
+@app.post("/api/tjarepo/songs/prepare-batch", dependencies=[Depends(require_token)])
+def prepare_batch(song_ids: list[str] = Body(embed=True)) -> Response:
+    if len(song_ids) > 4096:
+        raise HTTPException(status_code=413, detail="Batch exceeds 4096 songs")
+    valid_ids = [song_id for song_id in song_ids if song_id]
+    data = converter.enqueue_many(valid_ids)
+    return _json(data, 202)
+
+
 @app.post("/api/tjarepo/songs/{song_id}/prepare", dependencies=[Depends(require_token)])
-def prepare(song_id: str, background_tasks: BackgroundTasks) -> Response:
-    data = converter.prepare(song_id)
-    if data.get("status") == "queued":
-        background_tasks.add_task(converter.convert, song_id)
+def prepare(song_id: str) -> Response:
+    data = converter.enqueue(song_id)
     code = {
         "ready": 200,
         "queued": 202,
