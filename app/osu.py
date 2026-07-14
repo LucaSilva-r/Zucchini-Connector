@@ -43,6 +43,7 @@ class OsuChart:
     osu_stars: float
     level: int
     course_hint: int | None = None
+    display_title: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,13 +120,17 @@ def _inspect_osz_cached(
                     OsuChart(
                         member=info.filename,
                         audio_member=audio_info.filename,
-                        title=parsed.title_unicode or parsed.title,
+                        # osu!'s Title field is the romanized title intended
+                        # for clients that cannot display TitleUnicode. Use it
+                        # consistently in both the downloader and song select.
+                        title=parsed.title or parsed.title_unicode,
                         artist=parsed.artist_unicode or parsed.artist,
                         creator=parsed.creator,
                         version=parsed.version,
                         osu_stars=rating,
                         level=level,
                         course_hint=_course_hint(parsed.version),
+                        display_title=parsed.title or parsed.title_unicode,
                     )
                 )
     except (OSError, zipfile.BadZipFile, RuntimeError):
@@ -137,6 +142,9 @@ def _inspect_osz_cached(
     representative = selected[-1][1]
     return {
         "title": representative.title or Path(path).stem,
+        # Kept for clients using the split-title library schema. For osu! songs
+        # both public title fields intentionally carry the romanized Title.
+        "display_title": representative.display_title or representative.title,
         "subtitle": representative.artist or None,
         "creator": representative.creator,
         "audio_member": representative.audio_member,

@@ -138,6 +138,9 @@ def library() -> dict[str, Any]:
                 {
                     "id": s["id"],
                     "title": s["title"],
+                    # Always present so the PS3's forward-scan JSON parser
+                    # cannot consume a neighbouring song's fallback title.
+                    "display_title": s.get("display_title") or s["title"],
                     # Always present (even "") so the PS3's forward-scan parser
                     # never grabs a neighbouring song's subtitle.
                     "subtitle": s.get("subtitle") or "",
@@ -300,6 +303,7 @@ def _entry_for_osz(path: Path, category: str) -> dict[str, Any] | None:
     return {
         "id": "osu_" + hashlib.sha1(relative_path.encode()).hexdigest()[:16],
         "title": meta["title"] or real_path.stem,
+        "display_title": meta.get("display_title") or meta["title"] or real_path.stem,
         "subtitle": meta["subtitle"],
         "category": category,
         "source_type": "osz",

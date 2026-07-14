@@ -57,6 +57,7 @@ class OsuTests(unittest.TestCase):
         self.assertIsNotNone(meta)
         assert meta is not None
         self.assertEqual(meta["title"], "Example")
+        self.assertEqual(meta["display_title"], "Example")
         self.assertEqual(
             [course["id"] for course in meta["courses"]],
             ["e", "n", "h", "m"],
@@ -65,6 +66,23 @@ class OsuTests(unittest.TestCase):
             {course["osu_member"] for course in meta["courses"]},
             {"taiko.osu"},
         )
+
+    def test_osz_prefers_romanized_title_over_title_unicode(self) -> None:
+        raw = beatmap().replace(
+            b"Title:Example\n",
+            "Title:Example\nTitleUnicode:\u4f8b\u306e\u66f2\n".encode(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "unicode-title.osz"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("song.ogg", b"test audio placeholder")
+                archive.writestr("taiko.osu", raw)
+            meta = osu.inspect_osz(archive_path)
+
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertEqual(meta["title"], "Example")
+        self.assertEqual(meta["display_title"], "Example")
 
     def test_explicit_course_name_guides_single_chart(self) -> None:
         chart = osu.OsuChart(

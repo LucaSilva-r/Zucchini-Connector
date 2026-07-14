@@ -33,6 +33,10 @@ class CatalogLibraryTests(unittest.TestCase):
             [song["source"] for song in library["songs"]],
             ["tja", "osu"],
         )
+        self.assertEqual(
+            [song["display_title"] for song in library["songs"]],
+            ["TJA song", "osu! song"],
+        )
 
 
 if __name__ == "__main__":
