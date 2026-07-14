@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any
 
 from .config import settings
+from . import osu
 
 
 COURSE_MAP = {
@@ -37,22 +38,23 @@ _SONG_INDEX_AT = 0.0
 
 def categories() -> list[dict[str, Any]]:
     root = settings.ese_root
-    if not root.is_dir():
-        return []
-
     entries: list[dict[str, Any]] = []
-    for child in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name.casefold()):
-        if not re.match(r"^\d{2} ", child.name):
-            continue
-        count = len(songs(child.name))
-        if count == 0:
-            continue
-        entries.append({
-            "id": child.name,
-            "title": re.sub(r"^\d{2}\s+", "", child.name),
-            "path": child.name,
-            "song_count": count,
-        })
+    if root.is_dir():
+        for child in sorted(
+            [p for p in root.iterdir() if p.is_dir()],
+            key=lambda p: p.name.casefold(),
+        ):
+            if not re.match(r"^\d{2} ", child.name):
+                continue
+            count = len(songs(child.name))
+            if count == 0:
+                continue
+            entries.append({
+                "id": child.name,
+                "title": re.sub(r"^\d{2}\s+", "", child.name),
+                "path": child.name,
+                "song_count": count,
+            })
 
     root_songs = songs("root")
     if root_songs:
@@ -63,14 +65,29 @@ def categories() -> list[dict[str, Any]]:
             "song_count": len(root_songs),
         })
 
+    known_ids = {str(entry["id"]) for entry in entries}
+    extra_categories = sorted(
+        {
+            _osu_category_id(_osu_folder(path))
+            for path in _osz_files()
+        } - known_ids - {"root"},
+        key=str.casefold,
+    )
+    for category_id in extra_categories:
+        category_songs = songs(category_id)
+        if category_songs:
+            entries.append({
+                "id": category_id,
+                "title": _osu_category_title(category_id),
+                "path": category_id,
+                "song_count": len(category_songs),
+            })
+
     return sorted(entries, key=lambda e: str(e["id"]).casefold())
 
 
 def songs(category: str | None = None) -> list[dict[str, Any]]:
     root = settings.ese_root
-    if not root.is_dir():
-        return []
-
     if not category:
         merged: list[dict[str, Any]] = []
         for entry in categories():
@@ -80,15 +97,27 @@ def songs(category: str | None = None) -> list[dict[str, Any]]:
         return result
 
     if category == "root":
-        candidates = [p for p in root.iterdir() if p.is_dir() and not re.match(r"^\d{2} ", p.name)]
-        result = _songs_from_dirs(candidates, "root")
+        candidates = (
+            [
+                p
+                for p in root.iterdir()
+                if p.is_dir() and not re.match(r"^\d{2} ", p.name)
+            ]
+            if root.is_dir() else []
+        )
+        result = _songs_from_dirs(candidates, "root") + _songs_from_osz("root")
+        result.sort(key=lambda s: str(s["title"]).casefold())
         _remember_songs(result)
         return result
 
     base = _safe_path(category)
-    if base is None or not base.is_dir():
-        return []
-    result = _songs_from_dirs([p for p in base.iterdir() if p.is_dir()], category)
+    candidates = (
+        [p for p in base.iterdir() if p.is_dir()]
+        if base is not None and base.is_dir()
+        else []
+    )
+    result = _songs_from_dirs(candidates, category) + _songs_from_osz(category)
+    result.sort(key=lambda s: str(s["title"]).casefold())
     _remember_songs(result)
     return result
 
@@ -113,6 +142,12 @@ def library() -> dict[str, Any]:
                     # never grabs a neighbouring song's subtitle.
                     "subtitle": s.get("subtitle") or "",
                     "category": str(c["id"]),
+                    # Stable public origin metadata for lightweight clients.
+                    # Keep the converter's internal "osz" dispatch name out
+                    # of the API: users see charts as TJA or osu! sources.
+                    "source": (
+                        "osu" if s.get("source_type") == "osz" else "tja"
+                    ),
                     # Flat "id:stars,..." in canonical order so the PS3 gets star
                     # counts straight from the index — no per-song conversion.
                     "diffs": _diffs_str(s.get("courses") or []),
@@ -172,7 +207,7 @@ def _remember_songs(entries: list[dict[str, Any]]) -> None:
 def source_hash(entry: dict[str, Any]) -> str:
     h = hashlib.sha1()
     h.update(str(entry.get("source_path", "")).encode())
-    for key in ("tja_path", "audio_path"):
+    for key in ("tja_path", "audio_path", "osz_path"):
         path_value = entry.get(key)
         if not path_value:
             continue
@@ -191,6 +226,12 @@ def public_song(entry: dict[str, Any]) -> dict[str, Any]:
     out = dict(entry)
     out.pop("tja_path", None)
     out.pop("audio_path", None)
+    out.pop("osz_path", None)
+    out.pop("audio_member", None)
+    out["courses"] = [
+        {key: value for key, value in course.items() if key != "osu_member"}
+        for course in out.get("courses", [])
+    ]
     song_id = str(out.get("id", ""))
     out["title_images"] = {
         "hshort": f"/api/tjarepo/songs/{song_id}/title/hshort.png",
@@ -233,6 +274,85 @@ def _entry_for_tja(tja: Path, category: str) -> dict[str, Any] | None:
         "audio_name": audio.name if audio else None,
         "courses": meta["courses"],
     }
+
+
+def _songs_from_osz(category: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for path in _osz_files():
+        if _osu_category_id(_osu_folder(path)) != category:
+            continue
+        entry = _entry_for_osz(path, category)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _entry_for_osz(path: Path, category: str) -> dict[str, Any] | None:
+    try:
+        real_path = path.resolve()
+        relative = real_path.relative_to(settings.osu_root)
+    except ValueError:
+        return None
+    meta = osu.inspect_osz(real_path)
+    if meta is None:
+        return None
+    relative_path = relative.as_posix()
+    return {
+        "id": "osu_" + hashlib.sha1(relative_path.encode()).hexdigest()[:16],
+        "title": meta["title"] or real_path.stem,
+        "subtitle": meta["subtitle"],
+        "category": category,
+        "source_type": "osz",
+        "source_path": relative_path,
+        "folder_path": relative.parent.as_posix(),
+        "osz_path": str(real_path),
+        "audio_member": meta["audio_member"],
+        "audio_name": Path(str(meta["audio_member"])).name,
+        "creator": meta["creator"],
+        "courses": meta["courses"],
+    }
+
+
+def _osz_files() -> list[Path]:
+    if not settings.osu_root.is_dir():
+        return []
+    return sorted(
+        [
+            path
+            for path in settings.osu_root.rglob("*")
+            if path.is_file() and path.suffix.lower() == ".osz"
+        ],
+        key=lambda path: path.as_posix().casefold(),
+    )
+
+
+def _osu_folder(path: Path) -> str:
+    try:
+        relative = path.resolve().relative_to(settings.osu_root)
+    except ValueError:
+        return "root"
+    return relative.parts[0] if len(relative.parts) > 1 else "root"
+
+
+def _osu_category_id(folder: str) -> str:
+    if folder == "root":
+        return "root"
+    normalized = re.sub(r"^\d{2}\s+", "", folder).casefold()
+    if settings.ese_root.is_dir():
+        for child in settings.ese_root.iterdir():
+            if not child.is_dir() or not re.match(r"^\d{2} ", child.name):
+                continue
+            if re.sub(r"^\d{2}\s+", "", child.name).casefold() == normalized:
+                return child.name
+    return "osu_" + hashlib.sha1(folder.encode("utf-8")).hexdigest()[:12]
+
+
+def _osu_category_title(category_id: str) -> str:
+    for path in _osz_files():
+        folder = _osu_folder(path)
+        if _osu_category_id(folder) == category_id:
+            return re.sub(r"^\d{2}\s+", "", folder)
+    return "osu!"
 
 
 def _parse_tja_meta(path: Path) -> dict[str, Any]:
@@ -290,6 +410,8 @@ def _audio_path(directory: Path, wave: str | None) -> Path | None:
 
 def _safe_path(relative: str) -> Path | None:
     if "\0" in relative or ".." in relative or relative.startswith("/"):
+        return None
+    if not settings.ese_root.is_dir():
         return None
     try:
         path = (settings.ese_root / relative).resolve()

@@ -7,6 +7,7 @@ services:
       - "${TJAREPO_HTTPS_PORT:-8443}:8090"
     environment:
       TJAREPO_ESE_ROOT: /data/ESE
+      TJAREPO_OSU_ROOT: /data/OSU
       TJAREPO_CONVERT_ROOT: /app/storage/ESE-convert
       TJAREPO_TITLE_CACHE_ROOT: /app/storage/title-cache
       TJAREPO_PS3_AT3TOOL_PATH: /opt/ps3_at3tool.exe
@@ -21,6 +22,7 @@ services:
       WINEDEBUG: -all
     volumes:
       - ./storage/ESE:/data/ESE:ro
+      - ./storage/OSU:/data/OSU:ro
       - ./storage/ESE-convert:/app/storage/ESE-convert
       - ./storage/title-cache:/app/storage/title-cache
       - ./storage/certificates:/app/storage/certificates

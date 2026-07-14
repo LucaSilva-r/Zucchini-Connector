@@ -18,7 +18,7 @@ from tja2fumen.converters import convert_tja_to_fumen, fix_dk_note_types_course
 from tja2fumen.parsers import parse_tja
 from tja2fumen.writers import write_fumen
 
-from . import catalog
+from . import catalog, osu
 from .config import settings
 
 
@@ -250,24 +250,45 @@ def ready_status(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _convert_package(entry: dict[str, Any], package_root: Path, source_hash: str) -> dict[str, Any]:
-    if not entry.get("audio_path") or not Path(str(entry["audio_path"])).is_file():
-        raise RuntimeError("ESE song has no readable audio file.")
-    if not entry.get("tja_path") or not Path(str(entry["tja_path"])).is_file():
-        raise RuntimeError("ESE song has no readable TJA file.")
+    source_type = str(entry.get("source_type") or "tja")
+    if source_type == "osz":
+        if not entry.get("osz_path") or not Path(str(entry["osz_path"])).is_file():
+            raise RuntimeError("osu! song has no readable OSZ file.")
+    else:
+        if not entry.get("audio_path") or not Path(str(entry["audio_path"])).is_file():
+            raise RuntimeError("ESE song has no readable audio file.")
+        if not entry.get("tja_path") or not Path(str(entry["tja_path"])).is_file():
+            raise RuntimeError("ESE song has no readable TJA file.")
 
     tmp = package_root.parent / "package.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
     (tmp / "solo").mkdir(parents=True, exist_ok=True)
 
-    courses = _convert_charts(entry, tmp)
+    courses = (
+        _convert_osz_charts(entry, tmp)
+        if source_type == "osz"
+        else _convert_charts(entry, tmp)
+    )
     if not courses:
-        raise RuntimeError("TJA file does not declare any supported course.")
+        raise RuntimeError("Song does not contain any supported Taiko course.")
 
     song_id = str(entry["id"])
     song_upper = song_id.upper()
     nub_name = f"SONG_{song_upper}.nub"
     nsh_name = f"SONG_{song_upper}.nsh"
-    _convert_audio(Path(str(entry["audio_path"])), tmp / nub_name, tmp / nsh_name)
+    if source_type == "osz":
+        member = str(entry.get("audio_member") or "")
+        if not member:
+            raise RuntimeError("OSZ has no readable audio member.")
+        suffix = Path(member).suffix or ".audio"
+        with tempfile.TemporaryDirectory(prefix="tjarepo-osz-audio-") as tmpdir:
+            source = Path(tmpdir) / f"source{suffix}"
+            source.write_bytes(
+                osu.read_member(Path(str(entry["osz_path"])), member, osu.MAX_AUDIO_BYTES)
+            )
+            _convert_audio(source, tmp / nub_name, tmp / nsh_name)
+    else:
+        _convert_audio(Path(str(entry["audio_path"])), tmp / nub_name, tmp / nsh_name)
 
     assets = [
         _asset_manifest(tmp, nsh_name),
@@ -310,6 +331,34 @@ def _convert_charts(entry: dict[str, Any], tmp: Path) -> list[dict[str, Any]]:
             "id": course_id,
             "label": course.get("label", course_name),
             "stars": course.get("stars", 0),
+            "chart": chart,
+            "size": path.stat().st_size,
+            "sha1": _sha1_file(path),
+        })
+    return out
+
+
+def _convert_osz_charts(entry: dict[str, Any], tmp: Path) -> list[dict[str, Any]]:
+    archive = Path(str(entry["osz_path"]))
+    song_id = str(entry["id"])
+    out: list[dict[str, Any]] = []
+    for course in entry.get("courses", []):
+        course_id = str(course["id"])
+        course_name = COURSE_NAME_BY_ID.get(course_id)
+        member = str(course.get("osu_member") or "")
+        if course_name is None or not member:
+            continue
+        chart = f"solo/{song_id}_{course_id}.bin"
+        path = tmp / chart
+        raw = osu.read_member(archive, member, osu.MAX_OSU_BYTES)
+        fumen = osu.fumen_from_osu(raw, course_name, int(course.get("stars") or 1))
+        write_fumen(str(path), fumen)
+        out.append({
+            "id": course_id,
+            "label": course.get("label", course_name),
+            "stars": course.get("stars", 0),
+            "osu_stars": course.get("osu_stars"),
+            "version": course.get("version", ""),
             "chart": chart,
             "size": path.stat().st_size,
             "sha1": _sha1_file(path),

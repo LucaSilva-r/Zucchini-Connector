@@ -8,6 +8,7 @@ class Settings:
     def __init__(self) -> None:
         base = Path(__file__).resolve().parents[1]
         self.ese_root = Path(os.getenv("TJAREPO_ESE_ROOT", base / "storage" / "ESE")).resolve()
+        self.osu_root = Path(os.getenv("TJAREPO_OSU_ROOT", base / "storage" / "OSU")).resolve()
         self.convert_root = Path(os.getenv("TJAREPO_CONVERT_ROOT", base / "storage" / "ESE-convert")).resolve()
         self.title_cache_root = Path(
             os.getenv("TJAREPO_TITLE_CACHE_ROOT", base / "storage" / "title-cache")

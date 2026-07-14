@@ -161,8 +161,9 @@ def _title_source_hash(entry: dict[str, Any]) -> str:
     h.update(f"|{entry.get('category', '')}|".encode())
     for key in ("title", "subtitle"):
         h.update(f"|{entry.get(key, '')}|".encode("utf-8"))
-    path_value = entry.get("tja_path")
-    if path_value:
+    for path_value in (entry.get("tja_path"), entry.get("osz_path")):
+        if not path_value:
+            continue
         path = Path(str(path_value))
         if path.is_file():
             st = path.stat()
