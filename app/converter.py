@@ -373,13 +373,17 @@ def _convert_audio(source: Path, nub: Path, nsh: Path) -> None:
         tmp = Path(tmpdir)
         wav = tmp / "audio.wav"
         at3 = tmp / "audio.at3"
+        # ffmpeg (not sox): sox's libmad decoder ignores LAME gapless tags,
+        # leaving ~25-50ms of encoder-delay silence at the start of mp3s,
+        # which made every osu! note land early relative to the audio.
         _run([
-            settings.sox_path,
-            str(source),
-            "-b", "16",
-            "-e", "signed-integer",
-            "-r", "48000",
-            "-c", "2",
+            settings.ffmpeg_path,
+            "-y",
+            "-loglevel", "error",
+            "-i", str(source),
+            "-ar", "48000",
+            "-ac", "2",
+            "-c:a", "pcm_s16le",
             str(wav),
         ])
         _run([

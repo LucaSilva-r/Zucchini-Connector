@@ -172,8 +172,16 @@ class OsuTests(unittest.TestCase):
         ]
         self.assertEqual(fumen.header.order, ">")
         self.assertEqual(len(notes), 32)
-        self.assertEqual(fumen.measures[0].offset_start, 1000)
+        # 120 BPM has a 2000 ms 4/4 lead measure. Fumen stores the logical
+        # 1000 ms osu! boundary minus that lead; PS3 adds it at playback.
+        self.assertEqual(fumen.measures[0].offset_start, -1000)
         self.assertEqual(notes[0].pos, 0)
+        effective_first_note = (
+            fumen.measures[0].offset_start
+            + 4 * 60_000 / fumen.measures[0].bpm
+            + notes[0].pos
+        )
+        self.assertEqual(effective_first_note, 1000)
         self.assertEqual({note.note_type.lower()[:2] for note in notes}, {"do", "ka"})
 
 

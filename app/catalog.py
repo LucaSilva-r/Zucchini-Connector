@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
 import time
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
 from typing import Any
 
 from .config import settings
@@ -34,6 +35,15 @@ _SONG_INDEX_TTL_SECONDS = 60.0
 _SONG_INDEX_LOCK = RLock()
 _SONG_INDEX: dict[str, dict[str, Any]] = {}
 _SONG_INDEX_AT = 0.0
+
+_LIBRARY_LOCK = RLock()
+_LIBRARY_CACHE: dict[str, Any] | None = None
+_LIBRARY_DIRTY = Event()
+_WATCH_ACTIVE = False
+# Fallback when the filesystem watch is unavailable: age out the cache so new
+# songs still appear without a restart, just slower.
+_LIBRARY_TTL_SECONDS = 60.0
+_LIBRARY_AT = 0.0
 
 
 def categories() -> list[dict[str, Any]]:
@@ -125,7 +135,82 @@ def songs(category: str | None = None) -> list[dict[str, Any]]:
 def library() -> dict[str, Any]:
     """Whole library in one payload (categories + songs id/title/category) with
     a content hash. The PS3 caches this and only re-downloads when the hash
-    changes, so it never pages the server during navigation."""
+    changes, so it never pages the server during navigation.
+
+    Always served from memory: a build is a full filesystem re-scan taking
+    seconds, so it happens at startup and in the background whenever the
+    filesystem watch reports a change — never on the request path (except the
+    very first request after boot, before the warm thread finishes)."""
+    cached = _LIBRARY_CACHE
+    if cached is not None and (
+        _WATCH_ACTIVE or time.monotonic() - _LIBRARY_AT < _LIBRARY_TTL_SECONDS
+    ):
+        return cached
+    return refresh_library()
+
+
+def refresh_library() -> dict[str, Any]:
+    """Rescan the song roots and swap in a fresh library payload."""
+    global _LIBRARY_CACHE, _LIBRARY_AT
+    with _LIBRARY_LOCK:
+        built = _build_library()
+        _LIBRARY_CACHE = built
+        _LIBRARY_AT = time.monotonic()
+        return built
+
+
+def start_library_watch() -> bool:
+    """Watch the song roots and rebuild the library in the background after
+    changes settle. Returns True when the watch is running; on failure the
+    TTL fallback in library() keeps new songs appearing, just slower."""
+    global _WATCH_ACTIVE
+    try:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+    except ImportError:
+        print("[tjarepo] watchdog not installed; using library TTL rescan", flush=True)
+        return False
+
+    class _Handler(FileSystemEventHandler):
+        def on_any_event(self, event: Any) -> None:
+            _LIBRARY_DIRTY.set()
+
+    observer = Observer()
+    scheduled = 0
+    for root in (settings.ese_root, settings.osu_root):
+        if root.is_dir():
+            observer.schedule(_Handler(), str(root), recursive=True)
+            scheduled += 1
+    if not scheduled:
+        return False
+    observer.daemon = True
+    observer.start()
+
+    def _worker() -> None:
+        while True:
+            _LIBRARY_DIRTY.wait()
+            # Debounce: a song drop is many events (copies, temp files); wait
+            # until the filesystem has been quiet for a moment, then rebuild.
+            while True:
+                _LIBRARY_DIRTY.clear()
+                time.sleep(2.0)
+                if not _LIBRARY_DIRTY.is_set():
+                    break
+            try:
+                built = refresh_library()
+                print(
+                    f"[tjarepo] library rescan: {len(built['songs'])} songs",
+                    flush=True,
+                )
+            except Exception as exc:  # keep the watch alive on scan errors
+                print(f"[tjarepo] library rescan failed: {exc}", flush=True)
+
+    Thread(target=_worker, daemon=True, name="tjarepo-library-watch").start()
+    _WATCH_ACTIVE = True
+    return True
+
+
+def _build_library() -> dict[str, Any]:
     cats = categories()
     cat_out = [
         {"id": c["id"], "title": c["title"], "song_count": c["song_count"]}
@@ -154,6 +239,10 @@ def library() -> dict[str, Any]:
                     # Flat "id:stars,..." in canonical order so the PS3 gets star
                     # counts straight from the index — no per-song conversion.
                     "diffs": _diffs_str(s.get("courses") or []),
+                    # Short source_hash prefix. The PS3 compares this against
+                    # its cached manifest's source_hash to spot songs whose
+                    # source (or converter) changed, with no extra requests.
+                    "rev": source_hash(s)[:12],
                 }
             )
     payload = {"categories": cat_out, "songs": song_out}
@@ -208,8 +297,7 @@ def _remember_songs(entries: list[dict[str, Any]]) -> None:
 
 
 def source_hash(entry: dict[str, Any]) -> str:
-    h = hashlib.sha1()
-    h.update(str(entry.get("source_path", "")).encode())
+    files: list[tuple[str, str, int, int]] = []
     for key in ("tja_path", "audio_path", "osz_path"):
         path_value = entry.get(key)
         if not path_value:
@@ -218,8 +306,31 @@ def source_hash(entry: dict[str, Any]) -> str:
         if not path.is_file():
             continue
         st = path.stat()
-        h.update(f"|{path.name}|{st.st_size}|{int(st.st_mtime)}|".encode())
-        with path.open("rb") as fh:
+        files.append((str(path), path.name, st.st_size, st.st_mtime_ns))
+    return _source_hash_cached(
+        str(entry.get("source_path", "")),
+        entry.get("source_type") == "osz",
+        tuple(files),
+    )
+
+
+@functools.lru_cache(maxsize=65536)
+def _source_hash_cached(
+    source_path: str,
+    is_osz: bool,
+    files: tuple[tuple[str, str, int, int], ...],
+) -> str:
+    """Full-file sha1, memoized on (path, size, mtime) so /library can embed a
+    per-song rev without re-reading every source on each request. The digest
+    input must stay byte-identical to the historical formula: changing it would
+    flip every stored manifest's source_hash and force a global re-download."""
+    h = hashlib.sha1()
+    h.update(source_path.encode())
+    if is_osz:
+        h.update(f"|osu-converter-v{osu.CONVERTER_VERSION}|".encode())
+    for path, name, size, mtime_ns in files:
+        h.update(f"|{name}|{size}|{mtime_ns // 1_000_000_000}|".encode())
+        with open(path, "rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 h.update(chunk)
     return h.hexdigest()

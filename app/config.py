@@ -13,7 +13,7 @@ class Settings:
         self.title_cache_root = Path(
             os.getenv("TJAREPO_TITLE_CACHE_ROOT", base / "storage" / "title-cache")
         ).resolve()
-        self.sox_path = os.getenv("TJAREPO_SOX_PATH", "sox")
+        self.ffmpeg_path = os.getenv("TJAREPO_FFMPEG_PATH", "ffmpeg")
         self.wine_path = os.getenv("TJAREPO_WINE_PATH", "wine")
         self.ps3_at3tool_path = Path(os.getenv("TJAREPO_PS3_AT3TOOL_PATH", "/opt/ps3_at3tool.exe"))
         self.audio_bitrate_kbps = int(os.getenv("TJAREPO_AT3_BITRATE_KBPS", "256"))

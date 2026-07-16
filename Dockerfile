@@ -8,8 +8,7 @@ RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         openssl \
-        sox \
-        libsox-fmt-all \
+        ffmpeg \
         wine \
         wine32 \
         wine64 \

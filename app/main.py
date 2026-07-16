@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Thread
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
@@ -20,6 +21,12 @@ def startup() -> None:
         f"conversion workers={settings.conversion_workers}",
         flush=True,
     )
+    # Build the library off the request path: the first build reads every
+    # source file once and can take tens of seconds. Afterwards the watch
+    # rebuilds it in the background on file changes, so /library and
+    # /library/hash always answer instantly from memory.
+    Thread(target=catalog.refresh_library, daemon=True, name="tjarepo-warm").start()
+    catalog.start_library_watch()
 
 
 @app.on_event("shutdown")

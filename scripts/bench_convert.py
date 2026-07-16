@@ -22,7 +22,7 @@ def timed(label, fn):
     return r
 
 
-# Time every subprocess (sox / wine+at3tool) individually.
+# Time every subprocess (ffmpeg / wine+at3tool) individually.
 _orig_run = converter._run
 _tool_ms: dict[str, float] = {}
 

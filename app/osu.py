@@ -22,6 +22,7 @@ from tja2fumen.converters import fix_dk_note_types_course
 
 MAX_OSU_BYTES = 16 * 1024 * 1024
 MAX_AUDIO_BYTES = 512 * 1024 * 1024
+CONVERTER_VERSION = 3
 
 COURSES = (
     ("e", "Easy", 2),
@@ -242,10 +243,15 @@ def fumen_from_osu(raw: bytes, course_name: str, level: int) -> FumenCourse:
     for start, end in zip(boundaries, boundaries[1:]):
         red = _active_red(red_points, start)
         scroll, kiai = _timing_effects(parsed.timing_points, start)
+        bpm = 60_000.0 / red.beat_length
+        # Fumen measure offsets exclude an implicit 4/4 lead measure. The
+        # game adds it back at playback time; storing the raw osu! timestamp
+        # here would therefore make every note one full measure late.
+        fumen_lead = 4 * 60_000.0 / bpm
         measure = FumenMeasure(
-            bpm=60_000.0 / red.beat_length,
-            offset_start=start,
-            offset_end=end,
+            bpm=bpm,
+            offset_start=start - fumen_lead,
+            offset_end=end - fumen_lead,
             duration=end - start,
             gogo=kiai,
             barline=_time_key(start) in barlines,
@@ -266,7 +272,9 @@ def fumen_from_osu(raw: bytes, course_name: str, level: int) -> FumenCourse:
         measure = measures[idx]
         note = FumenNote(
             note_type=event.note_type,
-            pos=max(0.0, event.start - measure.offset_start),
+            # Note positions are relative to the logical osu! measure, not
+            # the serialized fumen offset (which excludes the lead measure).
+            pos=max(0.0, event.start - starts[idx]),
             duration=max(0.0, event.duration),
             hits=event.hits,
         )
@@ -500,7 +508,9 @@ def _measure_boundaries(
     red_points: list[TimingPoint],
     events: list[HitEvent],
 ) -> tuple[list[float], set[int]]:
-    start = red_points[0].offset
+    # Old maps can place an object just before their first timing point. Use
+    # the first object as an implicit timing boundary instead of clamping it.
+    start = min(red_points[0].offset, min(event.start for event in events))
     last_event = max(event.start + event.duration for event in events)
     final_red = _active_red(red_points, last_event)
     end = last_event + final_red.beat_length * final_red.meter
