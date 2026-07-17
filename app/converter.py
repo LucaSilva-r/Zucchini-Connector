@@ -18,7 +18,7 @@ from tja2fumen.converters import convert_tja_to_fumen, fix_dk_note_types_course
 from tja2fumen.parsers import parse_tja
 from tja2fumen.writers import write_fumen
 
-from . import catalog, osu
+from . import cabinets, catalog, osu
 from .config import settings
 
 
@@ -30,6 +30,7 @@ _CONVERSION_POOL = ThreadPoolExecutor(
 )
 _CONVERSION_FUTURES: dict[str, Future[None]] = {}
 _CONVERSION_LOCK = RLock()
+_BROKEN_IDS: set[str] = set()
 
 
 def enqueue(song_id: str) -> dict[str, Any]:
@@ -110,7 +111,7 @@ def _convert_if_needed(song_id: str) -> None:
         convert(song_id)
 
 
-def prepare(song_id: str) -> dict[str, Any]:
+def prepare(song_id: str, *, retry: bool = False) -> dict[str, Any]:
     entry = catalog.song(song_id)
     if entry is None:
         return {"status": "not_found", "song_id": song_id}
@@ -119,6 +120,8 @@ def prepare(song_id: str) -> dict[str, Any]:
 
     status = status_for(song_id)
     if status.get("status") in {"queued", "processing"}:
+        return status
+    if status.get("status") == "failed" and not retry:
         return status
 
     queued = {
@@ -142,6 +145,13 @@ def status_for(song_id: str) -> dict[str, Any]:
     if path.is_file():
         try:
             status = json.loads(path.read_text())
+            if status.get("source_hash") != catalog.source_hash(entry):
+                return {
+                    "status": "missing",
+                    "song_id": song_id,
+                    "title": entry["title"],
+                    "source_hash": catalog.source_hash(entry),
+                }
             if status.get("status") == "ready":
                 return {
                     "status": "missing",
@@ -185,6 +195,8 @@ def convert(song_id: str) -> None:
             "manifest": manifest,
             "updated_at": _now(),
         })
+        with _CONVERSION_LOCK:
+            _BROKEN_IDS.discard(song_id)
     except Exception as exc:
         shutil.rmtree(_package_root(song_id).parent / "package.tmp", ignore_errors=True)
         _write_json(_status_path(song_id), {
@@ -195,6 +207,127 @@ def convert(song_id: str) -> None:
             "message": str(exc),
             "updated_at": _now(),
         })
+        with _CONVERSION_LOCK:
+            _BROKEN_IDS.add(song_id)
+        cabinets.remove_songs_everywhere({song_id})
+
+
+def refresh_broken_index() -> set[str]:
+    """Load conversion failures that still match the current source files."""
+    found: set[str] = set()
+    if settings.convert_root.is_dir():
+        for path in settings.convert_root.glob("*/status.json"):
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if data.get("status") != "failed":
+                continue
+            song_id = str(data.get("song_id") or path.parent.name)
+            entry = catalog.song(song_id)
+            if entry is not None and data.get("source_hash") == catalog.source_hash(entry):
+                found.add(song_id)
+    with _CONVERSION_LOCK:
+        _BROKEN_IDS.clear()
+        _BROKEN_IDS.update(found)
+    return found
+
+
+def broken_song_ids() -> set[str]:
+    with _CONVERSION_LOCK:
+        candidates = set(_BROKEN_IDS)
+    stale: set[str] = set()
+    for song_id in candidates:
+        entry = catalog.song(song_id)
+        data = status_for(song_id)
+        if (entry is None or data.get("status") not in {"failed", "queued", "processing"} or
+                data.get("source_hash") != catalog.source_hash(entry)):
+            stale.add(song_id)
+    if stale:
+        with _CONVERSION_LOCK:
+            _BROKEN_IDS.difference_update(stale)
+    return candidates - stale
+
+
+# Per-song management_status cache keyed on (source_hash, status/manifest
+# mtimes): /library/manage would otherwise parse thousands of JSON files
+# per request. Bounded by the number of songs.
+_MGMT_CACHE: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def management_status(song_id: str, rev: str | None = None) -> dict[str, Any]:
+    """rev is the source_hash prefix already embedded in the cached library
+    payload; passing it avoids re-statting every source file per song on the
+    /library/manage request path."""
+    entry = catalog.song(song_id)
+    if entry is None:
+        return {
+            "conversion_status": "not_found",
+            "conversion_error": "",
+            "conversion_updated_at": "",
+        }
+    if not rev:
+        rev = catalog.source_hash(entry)[:12]
+    cache_key = (
+        rev,
+        _mtime_ns(_status_path(song_id)),
+        _mtime_ns(_manifest_path(song_id)),
+    )
+    cached = _MGMT_CACHE.get(song_id)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+    data: dict[str, Any] = {}
+    path = _status_path(song_id)
+    if path.is_file():
+        try:
+            candidate = json.loads(path.read_text())
+            if str(candidate.get("source_hash") or "")[: len(rev)] == rev:
+                data = candidate
+        except (OSError, ValueError):
+            pass
+    state = str(data.get("status") or "unconverted")
+    if state == "ready":
+        manifest = _read_manifest(song_id)
+        if manifest is None or str(manifest.get("source_hash") or "")[: len(rev)] != rev:
+            state = "unconverted"
+    result = {
+        "conversion_status": state,
+        "conversion_error": str(data.get("message") or ""),
+        "conversion_updated_at": str(data.get("updated_at") or ""),
+    }
+    _MGMT_CACHE[song_id] = (cache_key, result)
+    return result
+
+
+def retry(song_id: str) -> dict[str, Any]:
+    entry = catalog.song(song_id)
+    if entry is None:
+        return {"status": "not_found", "song_id": song_id}
+    with _CONVERSION_LOCK:
+        future = _CONVERSION_FUTURES.get(song_id)
+        if future is not None and not future.done():
+            return status_for(song_id)
+        data = prepare(song_id, retry=True)
+        future = _CONVERSION_POOL.submit(convert, song_id)
+        _CONVERSION_FUTURES[song_id] = future
+        _add_done_callback(song_id, future)
+        return data
+
+
+def remove_artifacts(song_id: str) -> None:
+    with _CONVERSION_LOCK:
+        future = _CONVERSION_FUTURES.get(song_id)
+        if future is not None and not future.done():
+            raise RuntimeError("The song is currently converting")
+        _BROKEN_IDS.discard(song_id)
+    shutil.rmtree(settings.convert_root / song_id, ignore_errors=True)
 
 
 def asset(song_id: str, asset_path: str) -> dict[str, Any] | None:

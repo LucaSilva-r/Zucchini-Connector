@@ -116,6 +116,44 @@ def set_selection(cabinet_id: str, song_ids: list[str]) -> dict | None:
         return cab
 
 
+def remove_songs_everywhere(song_ids: set[str]) -> int:
+    """Remove unavailable songs from every active or queued cabinet selection.
+
+    An in-flight sequence remains immutable. In that case the cleaned selection
+    becomes the queued sequence and is promoted after the cabinet acknowledges
+    the active job.
+    """
+    if not song_ids:
+        return 0
+    changed = 0
+    with _lock:
+        if not settings.cabinets_root.is_dir():
+            return 0
+        for path in sorted(settings.cabinets_root.glob("*.json")):
+            try:
+                cab = {**_DEFAULT, **json.loads(path.read_text())}
+            except (OSError, ValueError):
+                continue
+            desired = cab["queued_selection"]
+            if desired is None:
+                desired = cab["selection"]
+            cleaned = [sid for sid in desired if sid not in song_ids]
+            if cleaned == desired:
+                continue
+            if cab["selection_seq"] > cab["acked_seq"]:
+                cab["queued_selection"] = (
+                    None if cleaned == cab["selection"] else cleaned
+                )
+            else:
+                cab["selection"] = cleaned
+                cab["queued_selection"] = None
+                if cab["managed"]:
+                    cab["selection_seq"] += 1
+            _save(cab)
+            changed += 1
+    return changed
+
+
 def set_config(cabinet_id: str, kv: dict[str, str]) -> dict | None:
     """Merge section.key -> value pairs into the pending queue.
     Empty value removes a pending (not-yet-applied) key."""

@@ -22,8 +22,8 @@ services:
       WINEPREFIX: /tmp/wineprefix
       WINEDEBUG: -all
     volumes:
-      - ./storage/ESE:/data/ESE:ro
-      - ./storage/OSU:/data/OSU:ro
+      - ./storage/ESE:/data/ESE
+      - ./storage/OSU:/data/OSU
       - ./storage/ESE-convert:/app/storage/ESE-convert
       - ./storage/title-cache:/app/storage/title-cache
       - ./storage/cabinets:/app/storage/cabinets

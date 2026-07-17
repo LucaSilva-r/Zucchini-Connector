@@ -96,6 +96,13 @@ def categories() -> list[dict[str, Any]]:
     return sorted(entries, key=lambda e: str(e["id"]).casefold())
 
 
+# A library build lists every category twice (once for counts, once for the
+# payload); this short-lived cache makes that one directory walk. Invalidated
+# at the start of every refresh_library, so rebuilds always see fresh files.
+_SONGS_TTL_SECONDS = 2.0
+_SONGS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
 def songs(category: str | None = None) -> list[dict[str, Any]]:
     root = settings.ese_root
     if not category:
@@ -105,6 +112,10 @@ def songs(category: str | None = None) -> list[dict[str, Any]]:
         result = sorted(merged, key=lambda s: str(s["title"]).casefold())
         _remember_songs(result)
         return result
+
+    cached = _SONGS_CACHE.get(category)
+    if cached is not None and time.monotonic() - cached[0] < _SONGS_TTL_SECONDS:
+        return cached[1]
 
     if category == "root":
         candidates = (
@@ -116,19 +127,17 @@ def songs(category: str | None = None) -> list[dict[str, Any]]:
             if root.is_dir() else []
         )
         result = _songs_from_dirs(candidates, "root") + _songs_from_osz("root")
-        result.sort(key=lambda s: str(s["title"]).casefold())
-        _remember_songs(result)
-        return result
-
-    base = _safe_path(category)
-    candidates = (
-        [p for p in base.iterdir() if p.is_dir()]
-        if base is not None and base.is_dir()
-        else []
-    )
-    result = _songs_from_dirs(candidates, category) + _songs_from_osz(category)
+    else:
+        base = _safe_path(category)
+        candidates = (
+            [p for p in base.iterdir() if p.is_dir()]
+            if base is not None and base.is_dir()
+            else []
+        )
+        result = _songs_from_dirs(candidates, category) + _songs_from_osz(category)
     result.sort(key=lambda s: str(s["title"]).casefold())
     _remember_songs(result)
+    _SONGS_CACHE[category] = (time.monotonic(), result)
     return result
 
 
@@ -153,6 +162,9 @@ def refresh_library() -> dict[str, Any]:
     """Rescan the song roots and swap in a fresh library payload."""
     global _LIBRARY_CACHE, _LIBRARY_AT
     with _LIBRARY_LOCK:
+        _invalidate_osz_files()
+        _SONGS_CACHE.clear()
+        _osu_category_id.cache_clear()
         built = _build_library()
         _LIBRARY_CACHE = built
         _LIBRARY_AT = time.monotonic()
@@ -286,6 +298,26 @@ def warm_song_index() -> int:
         _SONG_INDEX.update({entry["id"]: entry for entry in entries})
         _SONG_INDEX_AT = time.monotonic()
     return len(_SONG_INDEX)
+
+
+def refresh_after_mutation() -> dict[str, Any]:
+    """Synchronously invalidate every catalog cache after an admin write.
+
+    _source_hash_cached is keyed on (path, size, mtime), so changed files miss
+    the cache naturally — no wholesale clear, which would force re-reading
+    every source file on the next build. The rebuild repopulates the song
+    index via _remember_songs, so no separate warm pass is needed."""
+    global _LIBRARY_CACHE, _LIBRARY_AT, _SONG_INDEX_AT
+    with _SONG_INDEX_LOCK:
+        _SONG_INDEX.clear()
+        _SONG_INDEX_AT = 0.0
+    with _LIBRARY_LOCK:
+        _LIBRARY_CACHE = None
+        _LIBRARY_AT = 0.0
+    built = refresh_library()
+    with _SONG_INDEX_LOCK:
+        _SONG_INDEX_AT = time.monotonic()
+    return built
 
 
 def _remember_songs(entries: list[dict[str, Any]]) -> None:
@@ -428,10 +460,27 @@ def _entry_for_osz(path: Path, category: str) -> dict[str, Any] | None:
     }
 
 
+# One library rescan calls _osz_files once per category; cache the walk for a
+# couple of seconds so a scan does it once. refresh_library invalidates it, so
+# uploads never see a stale listing.
+_OSZ_FILES_TTL_SECONDS = 2.0
+_OSZ_FILES_CACHE: tuple[float, list[Path]] | None = None
+
+
+def _invalidate_osz_files() -> None:
+    global _OSZ_FILES_CACHE
+    _OSZ_FILES_CACHE = None
+
+
 def _osz_files() -> list[Path]:
+    global _OSZ_FILES_CACHE
+    cached = _OSZ_FILES_CACHE
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _OSZ_FILES_TTL_SECONDS:
+        return cached[1]
     if not settings.osu_root.is_dir():
         return []
-    return sorted(
+    result = sorted(
         [
             path
             for path in settings.osu_root.rglob("*")
@@ -439,6 +488,8 @@ def _osz_files() -> list[Path]:
         ],
         key=lambda path: path.as_posix().casefold(),
     )
+    _OSZ_FILES_CACHE = (now, result)
+    return result
 
 
 def _osu_folder(path: Path) -> str:
@@ -449,6 +500,7 @@ def _osu_folder(path: Path) -> str:
     return relative.parts[0] if len(relative.parts) > 1 else "root"
 
 
+@functools.lru_cache(maxsize=1024)
 def _osu_category_id(folder: str) -> str:
     if folder == "root":
         return "root"
@@ -471,6 +523,18 @@ def _osu_category_title(category_id: str) -> str:
 
 
 def _parse_tja_meta(path: Path) -> dict[str, Any]:
+    """Mtime-keyed cache: a library rescan touches every TJA, so parsing must
+    only happen for files that actually changed."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"title": "", "subtitle": None, "wave": None, "courses": []}
+    return _parse_tja_meta_cached(str(path), stat.st_size, stat.st_mtime_ns)
+
+
+@functools.lru_cache(maxsize=16384)
+def _parse_tja_meta_cached(path_str: str, _size: int, _mtime_ns: int) -> dict[str, Any]:
+    path = Path(path_str)
     try:
         text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:

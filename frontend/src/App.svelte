@@ -2,6 +2,8 @@
   import KeyRoundIcon from "@lucide/svelte/icons/key-round";
   import MoonIcon from "@lucide/svelte/icons/moon";
   import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+  import LibraryBigIcon from "@lucide/svelte/icons/library-big";
+  import ServerIcon from "@lucide/svelte/icons/server";
   import SunIcon from "@lucide/svelte/icons/sun";
   import UnplugIcon from "@lucide/svelte/icons/unplug";
   import { onMount } from "svelte";
@@ -13,6 +15,7 @@
   import { Skeleton } from "$lib/components/ui/skeleton/index.js";
   import CabinetDashboard from "$lib/components/CabinetDashboard.svelte";
   import CabinetList from "$lib/components/CabinetList.svelte";
+  import LibraryManager from "$lib/components/LibraryManager.svelte";
   import type { Cabinet, Library } from "$lib/types.js";
 
   const storedToken = localStorage.getItem("connector_token") || "";
@@ -25,6 +28,7 @@
   let refreshing = $state(false);
   let authorized = $state(false);
   let error = $state("");
+  let view = $state<"cabinets" | "library">("cabinets");
   let dark = $state(localStorage.getItem("connector_theme") === "dark" ||
     (!localStorage.getItem("connector_theme") && matchMedia("(prefers-color-scheme: dark)").matches));
 
@@ -82,6 +86,12 @@
     }
   }
 
+  async function refreshAfterLibraryChange() {
+    const [cabinetResponse, loadedLibrary] = await Promise.all([getCabinets(token), getLibrary(token)]);
+    cabinets = cabinetResponse.cabinets;
+    library = loadedLibrary;
+  }
+
   function removeCabinet(id: string) {
     cabinets = cabinets.filter((cabinet) => cabinet.cabinet_id !== id);
     selectedId = cabinets[0]?.cabinet_id ?? null;
@@ -121,6 +131,10 @@
     </div>
     <div class="flex items-center gap-2">
       {#if authorized}
+        <div class="hidden items-center rounded-lg bg-muted p-1 sm:flex">
+          <Button variant={view === "cabinets" ? "secondary" : "ghost"} size="sm" onclick={() => view = "cabinets"}><ServerIcon /> Cabinets</Button>
+          <Button variant={view === "library" ? "secondary" : "ghost"} size="sm" onclick={() => view = "library"}><LibraryBigIcon /> Song library</Button>
+        </div>
         <Button variant="ghost" size="icon" aria-label="Refresh cabinets" onclick={() => refreshCabinets(false)}><RefreshCwIcon class={refreshing ? "animate-spin" : ""} /></Button>
         <Button variant="ghost" size="sm" onclick={changeToken}><KeyRoundIcon /> Token</Button>
       {/if}
@@ -131,7 +145,7 @@
   </div>
 </header>
 
-<main class="mx-auto w-full max-w-[1600px] p-4 sm:p-6">
+<main class="mx-auto w-full max-w-[1600px] p-3 sm:p-4">
   {#if !authorized}
     <div class="mx-auto grid min-h-[70vh] max-w-md place-items-center">
       <Card.Root class="operator-panel w-full">
@@ -149,18 +163,23 @@
       </Card.Root>
     </div>
   {:else if loading || !library}
-    <div class="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+    <div class="grid gap-4 lg:grid-cols-[270px_minmax(0,1fr)]">
       <Skeleton class="h-96 rounded-xl" /><Skeleton class="h-[640px] rounded-xl" />
     </div>
   {:else}
     {#if error}<div class="mb-4 flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"><UnplugIcon class="size-4" /> {error}</div>{/if}
-    <div class="grid items-start gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
-      <CabinetList {cabinets} {selectedId} onSelect={(id) => selectedId = id} />
-      {#if selectedCabinet}
-        <CabinetDashboard {token} cabinet={selectedCabinet} {library} onUpdated={replaceCabinet} onDeleted={removeCabinet} />
-      {:else}
-        <Card.Root class="operator-panel"><Card.Content class="grid min-h-80 place-items-center text-center text-sm text-muted-foreground">Select a cabinet after it checks in.</Card.Content></Card.Root>
-      {/if}
-    </div>
+    <div class="mb-4 grid grid-cols-2 rounded-lg bg-muted p-1 sm:hidden"><Button variant={view === "cabinets" ? "secondary" : "ghost"} size="sm" onclick={() => view = "cabinets"}><ServerIcon /> Cabinets</Button><Button variant={view === "library" ? "secondary" : "ghost"} size="sm" onclick={() => view = "library"}><LibraryBigIcon /> Library</Button></div>
+    {#if view === "library"}
+      <LibraryManager {token} onChanged={refreshAfterLibraryChange} />
+    {:else}
+      <div class="grid items-start gap-4 lg:grid-cols-[270px_minmax(0,1fr)]">
+        <CabinetList {cabinets} {selectedId} onSelect={(id) => selectedId = id} />
+        {#if selectedCabinet}
+          <CabinetDashboard {token} cabinet={selectedCabinet} {library} onUpdated={replaceCabinet} onDeleted={removeCabinet} />
+        {:else}
+          <Card.Root class="operator-panel"><Card.Content class="grid min-h-80 place-items-center text-center text-sm text-muted-foreground">Select a cabinet after it checks in.</Card.Content></Card.Root>
+        {/if}
+      </div>
+    {/if}
   {/if}
 </main>
