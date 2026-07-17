@@ -4,4 +4,7 @@ __pycache__
 .pytest_cache
 .venv
 .env
+frontend/node_modules
+frontend/.svelte-kit
+app/static/assets
 storage/ESE-convert

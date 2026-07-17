@@ -1,22 +1,23 @@
 services:
-  tjarepo:
+  connector:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${TJAREPO_HTTPS_PORT:-8443}:8090"
+      - "${CONNECTOR_HTTPS_PORT:-${TJAREPO_HTTPS_PORT:-8443}}:8090"
     environment:
-      TJAREPO_ESE_ROOT: /data/ESE
-      TJAREPO_OSU_ROOT: /data/OSU
-      TJAREPO_CONVERT_ROOT: /app/storage/ESE-convert
-      TJAREPO_TITLE_CACHE_ROOT: /app/storage/title-cache
-      TJAREPO_PS3_AT3TOOL_PATH: /opt/ps3_at3tool.exe
-      TJAREPO_API_TOKEN: "${TJAREPO_API_TOKEN:-}"
-      TJAREPO_AT3_BITRATE_KBPS: "${TJAREPO_AT3_BITRATE_KBPS:-256}"
-      TJAREPO_CONVERSION_WORKERS: "${TJAREPO_CONVERSION_WORKERS:-4}"
-      TJAREPO_TLS_ENABLED: "${TJAREPO_TLS_ENABLED:-1}"
-      TJAREPO_TLS_CN: "${TJAREPO_TLS_CN:-tjarepo.local}"
-      TJAREPO_TLS_DAYS: "${TJAREPO_TLS_DAYS:-3650}"
+      CONNECTOR_ESE_ROOT: /data/ESE
+      CONNECTOR_OSU_ROOT: /data/OSU
+      CONNECTOR_CONVERT_ROOT: /app/storage/ESE-convert
+      CONNECTOR_TITLE_CACHE_ROOT: /app/storage/title-cache
+      CONNECTOR_CABINETS_ROOT: /app/storage/cabinets
+      CONNECTOR_PS3_AT3TOOL_PATH: /opt/ps3_at3tool.exe
+      CONNECTOR_API_TOKEN: "${CONNECTOR_API_TOKEN:-${TJAREPO_API_TOKEN:-}}"
+      CONNECTOR_AT3_BITRATE_KBPS: "${CONNECTOR_AT3_BITRATE_KBPS:-${TJAREPO_AT3_BITRATE_KBPS:-256}}"
+      CONNECTOR_CONVERSION_WORKERS: "${CONNECTOR_CONVERSION_WORKERS:-${TJAREPO_CONVERSION_WORKERS:-4}}"
+      CONNECTOR_TLS_ENABLED: "${CONNECTOR_TLS_ENABLED:-${TJAREPO_TLS_ENABLED:-1}}"
+      CONNECTOR_TLS_CN: "${CONNECTOR_TLS_CN:-${TJAREPO_TLS_CN:-connector.local}}"
+      CONNECTOR_TLS_DAYS: "${CONNECTOR_TLS_DAYS:-${TJAREPO_TLS_DAYS:-3650}}"
       PYTHONPATH: /app/app
       WINEPREFIX: /tmp/wineprefix
       WINEDEBUG: -all
@@ -25,6 +26,7 @@ services:
       - ./storage/OSU:/data/OSU:ro
       - ./storage/ESE-convert:/app/storage/ESE-convert
       - ./storage/title-cache:/app/storage/title-cache
+      - ./storage/cabinets:/app/storage/cabinets
       - ./storage/certificates:/app/storage/certificates
       - ./storage/ps3_at3tool.exe:/opt/ps3_at3tool.exe:ro
     restart: unless-stopped

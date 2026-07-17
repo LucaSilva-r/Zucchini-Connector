@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-tls_enabled="${TJAREPO_TLS_ENABLED:-1}"
+# CONNECTOR_* preferred; TJAREPO_* kept as legacy alias for old deployments.
+tls_enabled="${CONNECTOR_TLS_ENABLED:-${TJAREPO_TLS_ENABLED:-1}}"
 
 # All conversion workers share this prefix. Initialize it once here so the
 # first batch cannot race several Wine prefix initializations against itself.
@@ -11,10 +12,10 @@ if [ -n "${WINEPREFIX:-}" ] && [ ! -d "$WINEPREFIX/drive_c" ]; then
 fi
 
 if [ "$tls_enabled" != "0" ] && [ "$tls_enabled" != "false" ]; then
-    cert_dir="${TJAREPO_TLS_CERT_DIR:-/app/storage/certificates/local}"
-    cert_path="${TJAREPO_TLS_CERT_FILE:-$cert_dir/server.crt}"
-    key_path="${TJAREPO_TLS_KEY_FILE:-$cert_dir/server.key}"
-    cn="${TJAREPO_TLS_CN:-tjarepo.local}"
+    cert_dir="${CONNECTOR_TLS_CERT_DIR:-${TJAREPO_TLS_CERT_DIR:-/app/storage/certificates/local}}"
+    cert_path="${CONNECTOR_TLS_CERT_FILE:-${TJAREPO_TLS_CERT_FILE:-$cert_dir/server.crt}}"
+    key_path="${CONNECTOR_TLS_KEY_FILE:-${TJAREPO_TLS_KEY_FILE:-$cert_dir/server.key}}"
+    cn="${CONNECTOR_TLS_CN:-${TJAREPO_TLS_CN:-connector.local}}"
 
     mkdir -p "$(dirname "$cert_path")" "$(dirname "$key_path")"
 
@@ -24,7 +25,7 @@ if [ "$tls_enabled" != "0" ] && [ "$tls_enabled" != "false" ]; then
             -newkey rsa:2048 \
             -sha256 \
             -nodes \
-            -days "${TJAREPO_TLS_DAYS:-3650}" \
+            -days "${CONNECTOR_TLS_DAYS:-${TJAREPO_TLS_DAYS:-3650}}" \
             -subj "/CN=$cn" \
             -addext "subjectAltName=DNS:$cn,DNS:localhost,IP:127.0.0.1" \
             -keyout "$key_path" \

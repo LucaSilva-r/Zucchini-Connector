@@ -3,21 +3,23 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Thread
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from . import catalog, converter
+from . import cabinets, catalog, converter
 from .config import settings
 from .titlegen.cache import title_argb, title_image
 
-app = FastAPI(title="tjarepo")
+app = FastAPI(title="zucchini-connector")
+api = APIRouter()
 
 
 @app.on_event("startup")
 def startup() -> None:
     count = catalog.warm_song_index()
     print(
-        f"[tjarepo] indexed {count} songs; "
+        f"[connector] indexed {count} songs; "
         f"conversion workers={settings.conversion_workers}",
         flush=True,
     )
@@ -25,7 +27,7 @@ def startup() -> None:
     # source file once and can take tens of seconds. Afterwards the watch
     # rebuilds it in the background on file changes, so /library and
     # /library/hash always answer instantly from memory.
-    Thread(target=catalog.refresh_library, daemon=True, name="tjarepo-warm").start()
+    Thread(target=catalog.refresh_library, daemon=True, name="connector-warm").start()
     catalog.start_library_watch()
 
 
@@ -46,22 +48,22 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/tjarepo/songs/categories", dependencies=[Depends(require_token)])
+@api.get("/songs/categories", dependencies=[Depends(require_token)])
 def categories() -> dict[str, object]:
     return {"categories": catalog.categories()}
 
 
-@app.get("/api/tjarepo/library", dependencies=[Depends(require_token)])
+@api.get("/library", dependencies=[Depends(require_token)])
 def library() -> dict[str, object]:
     return catalog.library()
 
 
-@app.get("/api/tjarepo/library/hash", dependencies=[Depends(require_token)])
+@api.get("/library/hash", dependencies=[Depends(require_token)])
 def library_hash() -> dict[str, str]:
     return {"hash": catalog.library_hash()}
 
 
-@app.get("/api/tjarepo/songs", dependencies=[Depends(require_token)])
+@api.get("/songs", dependencies=[Depends(require_token)])
 def songs(category: str | None = None, offset: int = 0, limit: int = 48) -> dict[str, object]:
     limit = max(1, min(200, limit))
     offset = max(0, offset)
@@ -75,7 +77,7 @@ def songs(category: str | None = None, offset: int = 0, limit: int = 48) -> dict
     }
 
 
-@app.get("/api/tjarepo/songs/{song_id}", dependencies=[Depends(require_token)])
+@api.get("/songs/{song_id}", dependencies=[Depends(require_token)])
 def show_song(song_id: str) -> dict[str, object]:
     entry = catalog.song(song_id)
     if entry is None:
@@ -83,7 +85,7 @@ def show_song(song_id: str) -> dict[str, object]:
     return catalog.public_song(entry)
 
 
-@app.get("/api/tjarepo/songs/{song_id}/hash", dependencies=[Depends(require_token)])
+@api.get("/songs/{song_id}/hash", dependencies=[Depends(require_token)])
 def song_hash(song_id: str) -> dict[str, str]:
     """Cheap freshness check: the same source_hash the prepared manifest stores,
     so the PS3 can reuse its local cache when it matches and only re-download
@@ -94,7 +96,7 @@ def song_hash(song_id: str) -> dict[str, str]:
     return {"source_hash": catalog.source_hash(entry)}
 
 
-@app.get("/api/tjarepo/songs/{song_id}/title/{variant}.png", dependencies=[Depends(require_token)])
+@api.get("/songs/{song_id}/title/{variant}.png", dependencies=[Depends(require_token)])
 def song_title_image(song_id: str, variant: str) -> FileResponse:
     path = title_image(song_id, variant)
     if path is None:
@@ -102,7 +104,7 @@ def song_title_image(song_id: str, variant: str) -> FileResponse:
     return FileResponse(path, media_type="image/png")
 
 
-@app.get("/api/tjarepo/songs/{song_id}/title/{variant}.argb", dependencies=[Depends(require_token)])
+@api.get("/songs/{song_id}/title/{variant}.argb", dependencies=[Depends(require_token)])
 def song_title_argb(song_id: str, variant: str) -> FileResponse:
     item = title_argb(song_id, variant)
     if item is None:
@@ -119,7 +121,7 @@ def song_title_argb(song_id: str, variant: str) -> FileResponse:
     )
 
 
-@app.post("/api/tjarepo/songs/prepare-batch", dependencies=[Depends(require_token)])
+@api.post("/songs/prepare-batch", dependencies=[Depends(require_token)])
 def prepare_batch(song_ids: list[str] = Body(embed=True)) -> Response:
     if len(song_ids) > 4096:
         raise HTTPException(status_code=413, detail="Batch exceeds 4096 songs")
@@ -128,7 +130,7 @@ def prepare_batch(song_ids: list[str] = Body(embed=True)) -> Response:
     return _json(data, 202)
 
 
-@app.post("/api/tjarepo/songs/{song_id}/prepare", dependencies=[Depends(require_token)])
+@api.post("/songs/{song_id}/prepare", dependencies=[Depends(require_token)])
 def prepare(song_id: str) -> Response:
     data = converter.enqueue(song_id)
     code = {
@@ -141,13 +143,13 @@ def prepare(song_id: str) -> Response:
     return _json(data, code)
 
 
-@app.get("/api/tjarepo/conversions/{song_id}", dependencies=[Depends(require_token)])
+@api.get("/conversions/{song_id}", dependencies=[Depends(require_token)])
 def conversion_status(song_id: str) -> Response:
     data = converter.status_for(song_id)
     return _json(data, 404 if data.get("status") == "not_found" else 200)
 
 
-@app.get("/api/tjarepo/conversions/{song_id}/assets/{asset_path:path}", dependencies=[Depends(require_token)])
+@api.get("/conversions/{song_id}/assets/{asset_path:path}", dependencies=[Depends(require_token)])
 def asset(song_id: str, asset_path: str, request: Request) -> Response:
     item = converter.asset(song_id, asset_path)
     if item is None:
@@ -186,3 +188,61 @@ def _json(data: dict[str, object], code: int) -> Response:
         status_code=code,
         media_type="application/json",
     )
+
+
+@api.post("/cabinet/poll", dependencies=[Depends(require_token)])
+async def cabinet_poll(request: Request) -> Response:
+    body = (await request.body()).decode("utf-8", errors="replace")
+    return Response(cabinets.handle_poll(body), media_type="text/plain")
+
+
+@api.get("/cabinets", dependencies=[Depends(require_token)])
+def cabinet_list() -> dict[str, object]:
+    return {"cabinets": cabinets.list_all()}
+
+
+@api.get("/cabinets/{cabinet_id}", dependencies=[Depends(require_token)])
+def cabinet_show(cabinet_id: str) -> dict[str, object]:
+    cab = cabinets.load(cabinet_id)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return cab
+
+
+@api.delete("/cabinets/{cabinet_id}", dependencies=[Depends(require_token)])
+def cabinet_delete(cabinet_id: str) -> dict[str, str]:
+    if not cabinets.delete(cabinet_id):
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return {"status": "deleted"}
+
+
+@api.put("/cabinets/{cabinet_id}/selection", dependencies=[Depends(require_token)])
+def cabinet_selection(cabinet_id: str, song_ids: list[str] = Body(embed=True)) -> dict[str, object]:
+    cab = cabinets.set_selection(cabinet_id, song_ids)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return cab
+
+
+@api.put("/cabinets/{cabinet_id}/config", dependencies=[Depends(require_token)])
+def cabinet_config(cabinet_id: str, config: dict[str, str] = Body(embed=True)) -> dict[str, object]:
+    cab = cabinets.set_config(cabinet_id, config)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return cab
+
+
+@app.get("/")
+def root() -> Response:
+    return Response(status_code=307, headers={"Location": "/ui/"})
+
+
+@app.get("/ui")
+def ui_redirect() -> Response:
+    return Response(status_code=307, headers={"Location": "/ui/"})
+
+
+# /api/tjarepo is the legacy mount for sprx builds predating the rename.
+app.include_router(api, prefix="/api/connector")
+app.include_router(api, prefix="/api/tjarepo")
+app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")

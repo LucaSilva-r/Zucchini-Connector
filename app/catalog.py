@@ -168,7 +168,7 @@ def start_library_watch() -> bool:
         from watchdog.events import FileSystemEventHandler
         from watchdog.observers import Observer
     except ImportError:
-        print("[tjarepo] watchdog not installed; using library TTL rescan", flush=True)
+        print("[connector] watchdog not installed; using library TTL rescan", flush=True)
         return False
 
     class _Handler(FileSystemEventHandler):
@@ -199,11 +199,11 @@ def start_library_watch() -> bool:
             try:
                 built = refresh_library()
                 print(
-                    f"[tjarepo] library rescan: {len(built['songs'])} songs",
+                    f"[connector] library rescan: {len(built['songs'])} songs",
                     flush=True,
                 )
             except Exception as exc:  # keep the watch alive on scan errors
-                print(f"[tjarepo] library rescan failed: {exc}", flush=True)
+                print(f"[connector] library rescan failed: {exc}", flush=True)
 
     Thread(target=_worker, daemon=True, name="tjarepo-library-watch").start()
     _WATCH_ACTIVE = True
@@ -348,10 +348,10 @@ def public_song(entry: dict[str, Any]) -> dict[str, Any]:
     ]
     song_id = str(out.get("id", ""))
     out["title_images"] = {
-        "hshort": f"/api/tjarepo/songs/{song_id}/title/hshort.png",
-        "hlong": f"/api/tjarepo/songs/{song_id}/title/hlong.png",
-        "vshort": f"/api/tjarepo/songs/{song_id}/title/vshort.png",
-        "vlong": f"/api/tjarepo/songs/{song_id}/title/vlong.png",
+        "hshort": f"/api/connector/songs/{song_id}/title/hshort.png",
+        "hlong": f"/api/connector/songs/{song_id}/title/hlong.png",
+        "vshort": f"/api/connector/songs/{song_id}/title/vshort.png",
+        "vlong": f"/api/connector/songs/{song_id}/title/vlong.png",
     }
     return out
 

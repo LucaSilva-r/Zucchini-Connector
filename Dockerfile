@@ -1,3 +1,11 @@
+FROM node:24-alpine AS frontend-build
+
+WORKDIR /ui
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -19,10 +27,11 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
-COPY docker/tjarepo-entrypoint.sh /usr/local/bin/tjarepo-entrypoint
-RUN chmod +x /usr/local/bin/tjarepo-entrypoint
-RUN mkdir -p /app/storage/ESE-convert /app/storage/title-cache /data/OSU
+COPY --from=frontend-build /app/static /app/app/static
+COPY docker/connector-entrypoint.sh /usr/local/bin/connector-entrypoint
+RUN chmod +x /usr/local/bin/connector-entrypoint
+RUN mkdir -p /app/storage/ESE-convert /app/storage/title-cache /app/storage/cabinets /data/OSU
 
 EXPOSE 8090
-ENTRYPOINT ["/usr/local/bin/tjarepo-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/connector-entrypoint"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]
