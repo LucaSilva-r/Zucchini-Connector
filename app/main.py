@@ -9,7 +9,6 @@ from fastapi.staticfiles import StaticFiles
 
 from . import cabinets, catalog, converter, library_admin
 from .config import settings
-from .titlegen.cache import title_argb, title_image
 
 app = FastAPI(title="zucchini-connector")
 api = APIRouter()
@@ -149,31 +148,6 @@ def song_hash(song_id: str) -> dict[str, str]:
     if entry is None:
         raise HTTPException(status_code=404, detail="Song not found")
     return {"source_hash": catalog.source_hash(entry)}
-
-
-@api.get("/songs/{song_id}/title/{variant}.png", dependencies=[Depends(require_token)])
-def song_title_image(song_id: str, variant: str) -> FileResponse:
-    path = title_image(song_id, variant)
-    if path is None:
-        raise HTTPException(status_code=404, detail="Title image not found")
-    return FileResponse(path, media_type="image/png")
-
-
-@api.get("/songs/{song_id}/title/{variant}.argb", dependencies=[Depends(require_token)])
-def song_title_argb(song_id: str, variant: str) -> FileResponse:
-    item = title_argb(song_id, variant)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Title image not found")
-    path, width, height = item
-    return FileResponse(
-        path,
-        media_type="application/octet-stream",
-        headers={
-            "X-Title-Width": str(width),
-            "X-Title-Height": str(height),
-            "X-Title-Format": "A8R8G8B8",
-        },
-    )
 
 
 @api.post("/songs/prepare-batch", dependencies=[Depends(require_token)])

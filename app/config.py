@@ -18,13 +18,12 @@ class Settings:
         self.ese_root = Path(env("ESE_ROOT", str(base / "storage" / "ESE"))).resolve()
         self.osu_root = Path(env("OSU_ROOT", str(base / "storage" / "OSU"))).resolve()
         self.convert_root = Path(env("CONVERT_ROOT", str(base / "storage" / "ESE-convert"))).resolve()
-        self.title_cache_root = Path(
-            env("TITLE_CACHE_ROOT", str(base / "storage" / "title-cache"))
-        ).resolve()
         self.cabinets_root = Path(env("CABINETS_ROOT", str(base / "storage" / "cabinets"))).resolve()
         self.ffmpeg_path = env("FFMPEG_PATH", "ffmpeg")
         self.wine_path = env("WINE_PATH", "wine")
-        self.ps3_at3tool_path = Path(env("PS3_AT3TOOL_PATH", "/opt/ps3_at3tool.exe"))
+        self.ps3_at3tool_path = Path(
+            env("PS3_AT3TOOL_PATH", str(base / "storage" / "ps3_at3tool.exe"))
+        )
         self.audio_bitrate_kbps = int(env("AT3_BITRATE_KBPS", "256"))
         default_workers = min(4, os.cpu_count() or 1)
         self.conversion_workers = max(

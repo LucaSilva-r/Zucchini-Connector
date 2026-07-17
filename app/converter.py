@@ -519,14 +519,17 @@ def _convert_audio(source: Path, nub: Path, nsh: Path) -> None:
             "-c:a", "pcm_s16le",
             str(wav),
         ])
-        _run([
-            settings.wine_path,
+        # ps3_at3tool.exe is a Windows binary: run it natively on Windows,
+        # through Wine everywhere else.
+        at3_cmd = [] if os.name == "nt" else [settings.wine_path]
+        at3_cmd += [
             str(settings.ps3_at3tool_path),
             "-e",
             "-br", str(settings.audio_bitrate_kbps),
             str(wav),
             str(at3),
-        ], env={**os.environ, "WINEDEBUG": "-all"})
+        ]
+        _run(at3_cmd, env={**os.environ, "WINEDEBUG": "-all"})
         riff = at3.read_bytes()
     header = _nub_header(riff)
     nsh.write_bytes(header)

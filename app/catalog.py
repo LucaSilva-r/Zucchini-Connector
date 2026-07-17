@@ -378,13 +378,6 @@ def public_song(entry: dict[str, Any]) -> dict[str, Any]:
         {key: value for key, value in course.items() if key != "osu_member"}
         for course in out.get("courses", [])
     ]
-    song_id = str(out.get("id", ""))
-    out["title_images"] = {
-        "hshort": f"/api/connector/songs/{song_id}/title/hshort.png",
-        "hlong": f"/api/connector/songs/{song_id}/title/hlong.png",
-        "vshort": f"/api/connector/songs/{song_id}/title/vshort.png",
-        "vlong": f"/api/connector/songs/{song_id}/title/vlong.png",
-    }
     return out
 
 

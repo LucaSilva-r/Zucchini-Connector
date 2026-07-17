@@ -16,9 +16,23 @@ packages into `storage/ESE-convert`; per-cabinet management state lives in
 
 ## Run
 
+Quick start on any machine (creates a venv, installs deps, self-signed TLS):
+
+```sh
+./run.sh        # Linux / macOS
+.\run.ps1       # Windows (PowerShell)
+```
+
+For a permanent install, Docker:
+
 ```sh
 docker compose up --build
 ```
+
+Everything lives under `./storage`: song sources in `storage/ESE` and
+`storage/OSU`, generated packages, cabinet state, TLS certificates, and
+`storage/ps3_at3tool.exe` (needed for song conversion, plus `ffmpeg`, and
+`wine` on non-Windows hosts).
 
 Web UI: `https://localhost:8443/ui` (enter the API token once; it is kept in
 localStorage).
