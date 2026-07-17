@@ -72,3 +72,6 @@ export const saveConfig = (token: string, cabinetId: string, config: Record<stri
 
 export const deleteCabinet = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}`, { method: "DELETE" });
+
+export const resyncCabinet = (token: string, cabinetId: string) =>
+  apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/resync`, { method: "POST" });

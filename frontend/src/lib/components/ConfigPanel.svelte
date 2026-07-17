@@ -1,7 +1,9 @@
 <script lang="ts">
   import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
   import SaveIcon from "@lucide/svelte/icons/save";
+  import XIcon from "@lucide/svelte/icons/x";
   import { saveConfig } from "$lib/api.js";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Label } from "$lib/components/ui/label/index.js";
@@ -20,6 +22,7 @@
   let configText = $state("");
   let savingFlags = $state(false);
   let savingConfig = $state(false);
+  let advancedWarningOpen = $state(false);
   let error = $state("");
   let loadedCabinetId = $state("");
   let loadedReport = $state("");
@@ -57,6 +60,24 @@
     return parseChassis(cabinet.reported_cfg);
   }
 
+  function reportedKeys() {
+    const keys = new Set<string>();
+    let section = "";
+    for (const rawLine of cabinet.reported_cfg.split("\n")) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+      if (line.startsWith("[") && line.endsWith("]")) {
+        section = line.slice(1, -1).trim();
+        continue;
+      }
+      const eq = line.indexOf("=");
+      if (!section || eq < 0) continue;
+      const key = line.slice(0, eq).trim();
+      if (key) keys.add(`${section}.${key}`);
+    }
+    return keys;
+  }
+
   async function persistFlags() {
     const reported = reportedFlags();
     const config: Record<string, string> = {};
@@ -76,13 +97,34 @@
     }
   }
 
-  async function persistConfig() {
+  async function removePending(key: string) {
+    error = "";
+    try {
+      onSaved(await saveConfig(token, cabinet.cabinet_id, { [key]: "" }));
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "Could not cancel the pending change";
+    }
+  }
+
+  async function persistConfig(acknowledged = false) {
     const config: Record<string, string> = {};
     for (const line of configText.split("\n")) {
       const match = line.match(/^\s*([\w.]+)\s*=\s*(.*?)\s*$/);
       if (match) config[match[1]] = match[2];
     }
     if (!Object.keys(config).length) return;
+    const known = reportedKeys();
+    if (known.size) {
+      const unknown = Object.keys(config).filter((key) => config[key] !== "" && !known.has(key));
+      if (unknown.length) {
+        error = `Unknown key${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. The cabinet only applies keys listed in its reported taiko_config.cfg below — a typo would stay pending forever.`;
+        return;
+      }
+    }
+    if (!acknowledged && !localStorage.getItem("connector_advanced_cfg_ack")) {
+      advancedWarningOpen = true;
+      return;
+    }
     savingConfig = true;
     error = "";
     try {
@@ -134,7 +176,7 @@
       <p class="text-xs text-muted-foreground">Enter one <code class="rounded bg-muted px-1.5 py-0.5 text-xs">section.key = value</code> per line.</p>
     </div>
     <Textarea bind:value={configText} rows={4} class="font-mono text-xs" placeholder="network.connector_port = 8443" />
-    <div><Button variant="secondary" size="sm" disabled={!configText.trim() || savingConfig} onclick={persistConfig}>{savingConfig ? "Queuing…" : "Queue configuration"}</Button></div>
+    <div><Button variant="secondary" size="sm" disabled={!configText.trim() || savingConfig} onclick={() => persistConfig()}>{savingConfig ? "Queuing…" : "Queue configuration"}</Button></div>
   </section>
 
   {#if Object.keys(cabinet.config_pending).length > 0}
@@ -142,7 +184,10 @@
       <h3 class="text-sm font-semibold">Pending delivery</h3>
       <div class="flex flex-wrap gap-2">
         {#each Object.entries(cabinet.config_pending) as [key, value]}
-          <Badge variant="outline" class="font-mono">{key}={value}</Badge>
+          <Badge variant="outline" class="gap-1 pr-1 font-mono">
+            {key}={value}
+            <button type="button" class="rounded-sm p-0.5 hover:bg-destructive/15 hover:text-destructive" aria-label={`Cancel pending ${key}`} title="Cancel this pending change" onclick={() => removePending(key)}><XIcon class="size-3" /></button>
+          </Badge>
         {/each}
       </div>
     </section>
@@ -153,3 +198,22 @@
     <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">{cabinet.reported_cfg || "Not reported yet."}</pre>
   </details>
 </div>
+
+<AlertDialog.Root bind:open={advancedWarningOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Advanced users only</AlertDialog.Title>
+      <AlertDialog.Description>
+        Changing the zucchini config from this section is for advanced users only. Keys are checked to exist, but values are not — a wrong type or format (a string where the game expects 0/1, a malformed value) can break the cabinet configuration and force you to fix or delete taiko_config.cfg manually on the machine.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={() => {
+        localStorage.setItem("connector_advanced_cfg_ack", "1");
+        advancedWarningOpen = false;
+        persistConfig(true);
+      }}>Yes, do as I say</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

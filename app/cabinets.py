@@ -116,6 +116,18 @@ def set_selection(cabinet_id: str, song_ids: list[str]) -> dict | None:
         return cab
 
 
+def force_resync(cabinet_id: str) -> dict | None:
+    """Bump the selection sequence without changing the selection, so the
+    cabinet re-runs its sync job (re-verifies and fetches anything missing)."""
+    with _lock:
+        cab = load(cabinet_id)
+        if cab is None or not cab["managed"]:
+            return cab
+        cab["selection_seq"] += 1
+        _save(cab)
+        return cab
+
+
 def remove_songs_everywhere(song_ids: set[str]) -> int:
     """Remove unavailable songs from every active or queued cabinet selection.
 
@@ -156,11 +168,25 @@ def remove_songs_everywhere(song_ids: set[str]) -> int:
 
 def set_config(cabinet_id: str, kv: dict[str, str]) -> dict | None:
     """Merge section.key -> value pairs into the pending queue.
-    Empty value removes a pending (not-yet-applied) key."""
+    Empty value removes a pending (not-yet-applied) key.
+
+    Keys are validated against the cabinet's reported taiko_config.cfg: a
+    typo'd key would sit in the pending queue forever because the game never
+    acknowledges keys it does not know. Skipped when the cabinet has not
+    reported its config yet (nothing to validate against). Raises ValueError
+    with the offending keys."""
     with _lock:
         cab = load(cabinet_id)
         if cab is None:
             return None
+        known = set(_parse_reported_cfg(cab["reported_cfg"]))
+        if known:
+            unknown = sorted(k for k, v in kv.items() if v != "" and k not in known)
+            if unknown:
+                raise ValueError(
+                    "Unknown config key(s): " + ", ".join(unknown)
+                    + ". The cabinet only applies keys present in its reported taiko_config.cfg."
+                )
         for key, value in kv.items():
             if value == "":
                 cab["config_pending"].pop(key, None)

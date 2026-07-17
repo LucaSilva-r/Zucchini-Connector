@@ -4,10 +4,11 @@
   import DownloadIcon from "@lucide/svelte/icons/download";
   import RadioIcon from "@lucide/svelte/icons/radio";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
-  import { deleteCabinet } from "$lib/api.js";
+  import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+  import { deleteCabinet, resyncCabinet } from "$lib/api.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
-  import { buttonVariants } from "$lib/components/ui/button/index.js";
+  import { Button, buttonVariants } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import ConfigPanel from "$lib/components/ConfigPanel.svelte";
@@ -24,16 +25,36 @@
 
   let deleting = $state(false);
   let deleteError = $state("");
+  let resyncing = $state(false);
+
+  async function forceResync() {
+    resyncing = true;
+    try {
+      onUpdated(await resyncCabinet(token, cabinet.cabinet_id));
+    } catch {
+      // Transient; the pending state shows on the next poll either way.
+    } finally {
+      resyncing = false;
+    }
+  }
   const online = $derived(Date.now() / 1000 - cabinet.last_seen <= 30);
   const pending = $derived(Object.keys(cabinet.config_pending).length > 0 || cabinet.acked_seq < cabinet.selection_seq || cabinet.queued_selection !== null);
   const desiredCount = $derived((cabinet.queued_selection ?? cabinet.selection).length);
   const operationVisible = $derived(
     cabinet.acked_seq < cabinet.selection_seq ||
-    !["idle", "complete"].includes(cabinet.operation_phase)
+    !["idle", "complete", "complete_errors"].includes(cabinet.operation_phase)
   );
   const operationPercent = $derived(cabinet.operation_total > 0
     ? Math.min(100, Math.round(cabinet.operation_done * 100 / cabinet.operation_total))
     : 0);
+  const missingSongs = $derived.by(() => {
+    if (!cabinet.managed) return [];
+    const have = new Set(cabinet.have);
+    const titles = new Map(library.songs.map((song) => [song.id, song.display_title || song.title]));
+    return (cabinet.queued_selection ?? cabinet.selection)
+      .filter((id) => !have.has(id))
+      .map((id) => ({ id, title: titles.get(id) }));
+  });
 
   async function forgetCabinet() {
     deleting = true;
@@ -89,11 +110,10 @@
       </AlertDialog.Root>
     </div>
 
-    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+    <div class="grid grid-cols-3 gap-2">
       <div class="flex items-baseline gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5"><span class="text-sm font-semibold">{cabinet.have.length}</span><span class="truncate text-xs text-muted-foreground">cached</span></div>
       <div class="flex items-baseline gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5"><span class="text-sm font-semibold">{cabinet.managed ? desiredCount : "—"}</span><span class="truncate text-xs text-muted-foreground">desired</span></div>
       <div class="flex items-baseline gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5"><span class="text-sm font-semibold">{Object.keys(cabinet.config_pending).length}</span><span class="truncate text-xs text-muted-foreground">pending config</span></div>
-      <div class="flex items-baseline gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5"><span class="text-sm font-semibold">{cabinet.acked_seq}/{cabinet.selection_seq}</span><span class="truncate text-xs text-muted-foreground">selection seq</span></div>
     </div>
 
     {#if operationVisible}
@@ -110,6 +130,21 @@
           {#if cabinet.operation_song}<span class="truncate font-mono">{cabinet.operation_song}</span>{/if}
         </div>
         {#if cabinet.operation_error}<p class="mt-2 text-xs text-destructive">{cabinet.operation_error}</p>{/if}
+      </div>
+    {/if}
+
+    {#if !operationVisible && missingSongs.length}
+      <div class="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="font-medium">{missingSongs.length} selected {missingSongs.length === 1 ? "song is" : "songs are"} not on the cabinet</p>
+          <Button variant="outline" size="sm" class="h-7" disabled={resyncing} onclick={forceResync}><RefreshCwIcon class={resyncing ? "animate-spin" : ""} /> Force resync</Button>
+        </div>
+        <ul class="mt-1.5 grid max-h-40 gap-0.5 overflow-y-auto text-xs text-muted-foreground">
+          {#each missingSongs as song (song.id)}
+            <li class="flex items-baseline gap-2"><span class="truncate">{song.title ?? "Unavailable song"}</span><span class="shrink-0 font-mono text-[10px]">{song.id}</span></li>
+          {/each}
+        </ul>
+        <p class="mt-1.5 text-xs text-muted-foreground">The cabinet failed to download or verify these during its last sync; it retries on its next sync run.</p>
       </div>
     {/if}
   </Card.Header>

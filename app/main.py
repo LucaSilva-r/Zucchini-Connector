@@ -271,6 +271,16 @@ def cabinet_delete(cabinet_id: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
+@api.post("/cabinets/{cabinet_id}/resync", dependencies=[Depends(require_token)])
+def cabinet_resync(cabinet_id: str) -> dict[str, object]:
+    cab = cabinets.force_resync(cabinet_id)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if not cab["managed"]:
+        raise HTTPException(status_code=409, detail="Cabinet has no managed selection to resync")
+    return cab
+
+
 @api.put("/cabinets/{cabinet_id}/selection", dependencies=[Depends(require_token)])
 def cabinet_selection(cabinet_id: str, song_ids: list[str] = Body(embed=True)) -> dict[str, object]:
     broken = converter.broken_song_ids()
@@ -282,7 +292,10 @@ def cabinet_selection(cabinet_id: str, song_ids: list[str] = Body(embed=True)) -
 
 @api.put("/cabinets/{cabinet_id}/config", dependencies=[Depends(require_token)])
 def cabinet_config(cabinet_id: str, config: dict[str, str] = Body(embed=True)) -> dict[str, object]:
-    cab = cabinets.set_config(cabinet_id, config)
+    try:
+        cab = cabinets.set_config(cabinet_id, config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if cab is None:
         raise HTTPException(status_code=404, detail="Cabinet not found")
     return cab
