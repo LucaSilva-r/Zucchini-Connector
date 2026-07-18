@@ -4,6 +4,18 @@ set -eu
 # CONNECTOR_* preferred; TJAREPO_* kept as legacy alias for old deployments.
 tls_enabled="${CONNECTOR_TLS_ENABLED:-${TJAREPO_TLS_ENABLED:-1}}"
 
+# The image runs as the host UID/GID, which may not have a passwd entry or a
+# conventional home directory. Wine requires HOME (and its prefix) to be owned
+# by the current user, so prepare both here rather than pointing HOME at /tmp.
+if [ -n "${HOME:-}" ]; then
+    mkdir -p "$HOME"
+    chmod 700 "$HOME"
+fi
+if [ -n "${WINEPREFIX:-}" ]; then
+    mkdir -p "$WINEPREFIX"
+    chmod 700 "$WINEPREFIX"
+fi
+
 # All conversion workers share this prefix. Initialize it once here so the
 # first batch cannot race several Wine prefix initializations against itself.
 if [ -n "${WINEPREFIX:-}" ] && [ ! -d "$WINEPREFIX/drive_c" ]; then

@@ -1,6 +1,6 @@
 import type { Cabinet, Library, ManagedLibrary, Song } from "$lib/types.js";
 
-const API = "/api/connector";
+const API = "/api/ui";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {

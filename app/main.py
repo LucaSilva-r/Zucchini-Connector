@@ -11,7 +11,8 @@ from . import cabinets, catalog, converter, library_admin
 from .config import settings
 
 app = FastAPI(title="zucchini-connector")
-api = APIRouter()
+cabinet_api = APIRouter()
+ui_api = APIRouter()
 
 
 @app.on_event("startup")
@@ -50,27 +51,28 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@api.get("/songs/categories", dependencies=[Depends(require_token)])
+@cabinet_api.get("/songs/categories", dependencies=[Depends(require_token)])
 def categories() -> dict[str, object]:
     return {"categories": library_admin.available_library()["categories"]}
 
 
-@api.get("/library", dependencies=[Depends(require_token)])
+@ui_api.get("/library", dependencies=[Depends(require_token)])
+@cabinet_api.get("/library", dependencies=[Depends(require_token)])
 def library() -> dict[str, object]:
     return library_admin.available_library()
 
 
-@api.get("/library/hash", dependencies=[Depends(require_token)])
+@cabinet_api.get("/library/hash", dependencies=[Depends(require_token)])
 def library_hash() -> dict[str, str]:
     return {"hash": str(library_admin.available_library()["hash"])}
 
 
-@api.get("/library/manage", dependencies=[Depends(require_token)])
+@ui_api.get("/library/manage", dependencies=[Depends(require_token)])
 def manage_library() -> dict[str, object]:
     return library_admin.management_library()
 
 
-@api.post("/library/upload/osz", dependencies=[Depends(require_token)])
+@ui_api.post("/library/upload/osz", dependencies=[Depends(require_token)])
 async def library_upload_osz(
     file: UploadFile = File(...), category: str = Form(...)
 ) -> dict[str, object]:
@@ -80,7 +82,7 @@ async def library_upload_osz(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@api.post("/library/upload/tja", dependencies=[Depends(require_token)])
+@ui_api.post("/library/upload/tja", dependencies=[Depends(require_token)])
 async def library_upload_tja(
     files: list[UploadFile] = File(...), category: str = Form(...)
 ) -> dict[str, object]:
@@ -90,7 +92,7 @@ async def library_upload_tja(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@api.post("/library/songs/delete-batch", dependencies=[Depends(require_token)])
+@ui_api.post("/library/songs/delete-batch", dependencies=[Depends(require_token)])
 def library_delete_songs(song_ids: list[str] = Body(embed=True)) -> dict[str, object]:
     if len(song_ids) > 4096:
         raise HTTPException(status_code=413, detail="Batch exceeds 4096 songs")
@@ -100,7 +102,7 @@ def library_delete_songs(song_ids: list[str] = Body(embed=True)) -> dict[str, ob
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@api.delete("/library/songs/{song_id}", dependencies=[Depends(require_token)])
+@ui_api.delete("/library/songs/{song_id}", dependencies=[Depends(require_token)])
 def library_delete_song(song_id: str) -> dict[str, str]:
     try:
         return library_admin.delete_song(song_id)
@@ -110,13 +112,13 @@ def library_delete_song(song_id: str) -> dict[str, str]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@api.post("/library/songs/{song_id}/retry", dependencies=[Depends(require_token)])
+@ui_api.post("/library/songs/{song_id}/retry", dependencies=[Depends(require_token)])
 def library_retry_song(song_id: str) -> Response:
     data = converter.retry(song_id)
     return _json(data, 404 if data.get("status") == "not_found" else 202)
 
 
-@api.get("/songs", dependencies=[Depends(require_token)])
+@cabinet_api.get("/songs", dependencies=[Depends(require_token)])
 def songs(category: str | None = None, offset: int = 0, limit: int = 48) -> dict[str, object]:
     limit = max(1, min(200, limit))
     offset = max(0, offset)
@@ -132,7 +134,7 @@ def songs(category: str | None = None, offset: int = 0, limit: int = 48) -> dict
     }
 
 
-@api.get("/songs/{song_id}", dependencies=[Depends(require_token)])
+@cabinet_api.get("/songs/{song_id}", dependencies=[Depends(require_token)])
 def show_song(song_id: str) -> dict[str, object]:
     entry = catalog.song(song_id)
     if entry is None or song_id in converter.broken_song_ids():
@@ -140,7 +142,7 @@ def show_song(song_id: str) -> dict[str, object]:
     return catalog.public_song(entry)
 
 
-@api.get("/songs/{song_id}/hash", dependencies=[Depends(require_token)])
+@cabinet_api.get("/songs/{song_id}/hash", dependencies=[Depends(require_token)])
 def song_hash(song_id: str) -> dict[str, str]:
     """Cheap freshness check: the same source_hash the prepared manifest stores,
     so the PS3 can reuse its local cache when it matches and only re-download
@@ -151,7 +153,7 @@ def song_hash(song_id: str) -> dict[str, str]:
     return {"source_hash": catalog.source_hash(entry)}
 
 
-@api.post("/songs/prepare-batch", dependencies=[Depends(require_token)])
+@cabinet_api.post("/songs/prepare-batch", dependencies=[Depends(require_token)])
 def prepare_batch(song_ids: list[str] = Body(embed=True)) -> Response:
     if len(song_ids) > 4096:
         raise HTTPException(status_code=413, detail="Batch exceeds 4096 songs")
@@ -160,7 +162,7 @@ def prepare_batch(song_ids: list[str] = Body(embed=True)) -> Response:
     return _json(data, 202)
 
 
-@api.post("/songs/{song_id}/prepare", dependencies=[Depends(require_token)])
+@cabinet_api.post("/songs/{song_id}/prepare", dependencies=[Depends(require_token)])
 def prepare(song_id: str) -> Response:
     data = converter.enqueue(song_id)
     code = {
@@ -173,13 +175,13 @@ def prepare(song_id: str) -> Response:
     return _json(data, code)
 
 
-@api.get("/conversions/{song_id}", dependencies=[Depends(require_token)])
+@cabinet_api.get("/conversions/{song_id}", dependencies=[Depends(require_token)])
 def conversion_status(song_id: str) -> Response:
     data = converter.status_for(song_id)
     return _json(data, 404 if data.get("status") == "not_found" else 200)
 
 
-@api.get("/conversions/{song_id}/assets/{asset_path:path}", dependencies=[Depends(require_token)])
+@cabinet_api.get("/conversions/{song_id}/assets/{asset_path:path}", dependencies=[Depends(require_token)])
 def asset(song_id: str, asset_path: str, request: Request) -> Response:
     item = converter.asset(song_id, asset_path)
     if item is None:
@@ -220,18 +222,18 @@ def _json(data: dict[str, object], code: int) -> Response:
     )
 
 
-@api.post("/cabinet/poll", dependencies=[Depends(require_token)])
+@cabinet_api.post("/cabinet/poll", dependencies=[Depends(require_token)])
 async def cabinet_poll(request: Request) -> Response:
     body = (await request.body()).decode("utf-8", errors="replace")
     return Response(cabinets.handle_poll(body), media_type="text/plain")
 
 
-@api.get("/cabinets", dependencies=[Depends(require_token)])
+@ui_api.get("/cabinets", dependencies=[Depends(require_token)])
 def cabinet_list() -> dict[str, object]:
     return {"cabinets": cabinets.list_all()}
 
 
-@api.get("/cabinets/{cabinet_id}", dependencies=[Depends(require_token)])
+@ui_api.get("/cabinets/{cabinet_id}", dependencies=[Depends(require_token)])
 def cabinet_show(cabinet_id: str) -> dict[str, object]:
     cab = cabinets.load(cabinet_id)
     if cab is None:
@@ -239,14 +241,14 @@ def cabinet_show(cabinet_id: str) -> dict[str, object]:
     return cab
 
 
-@api.delete("/cabinets/{cabinet_id}", dependencies=[Depends(require_token)])
+@ui_api.delete("/cabinets/{cabinet_id}", dependencies=[Depends(require_token)])
 def cabinet_delete(cabinet_id: str) -> dict[str, str]:
     if not cabinets.delete(cabinet_id):
         raise HTTPException(status_code=404, detail="Cabinet not found")
     return {"status": "deleted"}
 
 
-@api.post("/cabinets/{cabinet_id}/resync", dependencies=[Depends(require_token)])
+@ui_api.post("/cabinets/{cabinet_id}/resync", dependencies=[Depends(require_token)])
 def cabinet_resync(cabinet_id: str) -> dict[str, object]:
     cab = cabinets.force_resync(cabinet_id)
     if cab is None:
@@ -256,7 +258,7 @@ def cabinet_resync(cabinet_id: str) -> dict[str, object]:
     return cab
 
 
-@api.put("/cabinets/{cabinet_id}/selection", dependencies=[Depends(require_token)])
+@ui_api.put("/cabinets/{cabinet_id}/selection", dependencies=[Depends(require_token)])
 def cabinet_selection(cabinet_id: str, song_ids: list[str] = Body(embed=True)) -> dict[str, object]:
     broken = converter.broken_song_ids()
     cab = cabinets.set_selection(cabinet_id, [song_id for song_id in song_ids if song_id not in broken])
@@ -265,7 +267,7 @@ def cabinet_selection(cabinet_id: str, song_ids: list[str] = Body(embed=True)) -
     return cab
 
 
-@api.put("/cabinets/{cabinet_id}/config", dependencies=[Depends(require_token)])
+@ui_api.put("/cabinets/{cabinet_id}/config", dependencies=[Depends(require_token)])
 def cabinet_config(cabinet_id: str, config: dict[str, str] = Body(embed=True)) -> dict[str, object]:
     try:
         cab = cabinets.set_config(cabinet_id, config)
@@ -287,6 +289,7 @@ def ui_redirect() -> Response:
 
 
 # /api/tjarepo is the legacy mount for sprx builds predating the rename.
-app.include_router(api, prefix="/api/connector")
-app.include_router(api, prefix="/api/tjarepo")
+app.include_router(cabinet_api, prefix="/api/connector")
+app.include_router(cabinet_api, prefix="/api/tjarepo")
+app.include_router(ui_api, prefix="/api/ui")
 app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")
