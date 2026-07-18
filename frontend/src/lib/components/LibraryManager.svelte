@@ -34,9 +34,9 @@
   let categoryFilter = $state("all");
   let page = $state(1);
   let oszFile = $state<File | null>(null);
-  let oszCategory = $state("root");
+  let oszCategory = $state("");
   let tjaFiles = $state<File[]>([]);
-  let tjaCategory = $state("root");
+  let tjaCategory = $state("");
   let checked = $state<string[]>([]);
   let deleteTargets = $state<ManagedSong[]>([]);
   let deleteOpen = $state(false);
@@ -91,6 +91,8 @@
     error = "";
     try {
       data = await getManagedLibrary(token);
+      if (!oszCategory) oszCategory = data.categories[0]?.id ?? "";
+      if (!tjaCategory) tjaCategory = data.categories[0]?.id ?? "";
       const known = new Set(data.songs.map((song) => song.id));
       checked = checked.filter((id) => known.has(id));
       if (page > pageCount) page = pageCount;

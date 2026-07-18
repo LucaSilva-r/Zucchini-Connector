@@ -16,6 +16,7 @@ api = APIRouter()
 
 @app.on_event("startup")
 def startup() -> None:
+    catalog.ensure_category_dirs()
     count = catalog.warm_song_index()
     broken = converter.refresh_broken_index()
     cabinets.remove_songs_everywhere(broken)
@@ -71,7 +72,7 @@ def manage_library() -> dict[str, object]:
 
 @api.post("/library/upload/osz", dependencies=[Depends(require_token)])
 async def library_upload_osz(
-    file: UploadFile = File(...), category: str = Form("root")
+    file: UploadFile = File(...), category: str = Form(...)
 ) -> dict[str, object]:
     try:
         return await library_admin.upload_osz(file, category)
@@ -81,7 +82,7 @@ async def library_upload_osz(
 
 @api.post("/library/upload/tja", dependencies=[Depends(require_token)])
 async def library_upload_tja(
-    files: list[UploadFile] = File(...), category: str = Form("root")
+    files: list[UploadFile] = File(...), category: str = Form(...)
 ) -> dict[str, object]:
     try:
         return await library_admin.upload_tja(files, category)

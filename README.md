@@ -3,15 +3,15 @@
 Management server for TaikoZucchini arcade cabinets, grown out of the tjarepo
 conversion service. Two jobs:
 
-1. **Song catalog + conversion** — browse ESE/TJA and osu! beatmap
+1. **Song catalog + conversion** — browse TJA and osu! beatmap
    repositories and convert requested songs into Taiko PS3 custom-song assets.
 2. **Remote cabinet management** — cabinets running zucchini.sprx poll the
    connector; operators use the web UI at `/ui` to rename cabinets, pick each
    cabinet's song selection, and queue config changes (including chassisinfo
    operator flags) without opening the cab or attaching a controller.
 
-The service keeps its ESE and OSZ sources read-only and writes generated
-packages into `storage/ESE-convert`; per-cabinet management state lives in
+The service keeps its TJA and OSZ sources read-only and writes generated
+packages into `storage/SONGS/CONVERTED`; per-cabinet management state lives in
 `storage/cabinets/<cabinet_id>.json`.
 
 ## Run
@@ -29,13 +29,19 @@ For a permanent install, Docker:
 docker compose up --build
 ```
 
-Everything lives under `./storage`: song sources in `storage/ESE` and
-`storage/OSU`, generated packages, cabinet state, TLS certificates, and
-`storage/ps3_at3tool.exe` (needed for song conversion, plus `ffmpeg`, and
-`wine` on non-Windows hosts).
+Everything lives under `./storage`: song sources in `storage/SONGS/TJA` and
+`storage/SONGS/OSU`, generated packages in `storage/SONGS/CONVERTED`, cabinet
+state, TLS certificates, and `storage/ps3_at3tool.exe` (needed for song
+conversion, plus `ffmpeg`, and `wine` on non-Windows hosts).
 
 Web UI: `https://localhost:8443/ui` (enter the API token once; it is kept in
 localStorage).
+
+The local run scripts check the host firewall before starting. On Windows they
+can add a Private/Domain Windows Defender Firewall rule; on Linux they can add
+the port to an active UFW or firewalld configuration. Both ask before changing
+firewall rules. Set `CONNECTOR_FIREWALL=0` to skip the check (for example, in
+an unattended launch environment).
 
 The UI is a Svelte 5/Vite application built from `frontend/` with
 shadcn-svelte components checked into `frontend/src/lib/components/ui/`.
@@ -62,9 +68,9 @@ rename keep working. `CONNECTOR_*` environment variables are preferred;
 
 The compose file mounts:
 
-- ESE source repo from `./storage/ESE`
-- osu! beatmap archives from `./storage/OSU`
-- conversion cache at `./storage/ESE-convert`
+- TJA source library from `./storage/SONGS/TJA`
+- osu! beatmap archives from `./storage/SONGS/OSU`
+- conversion cache at `./storage/SONGS/CONVERTED`
 - cabinet management state at `./storage/cabinets`
 - local TLS certificates at `./storage/certificates`
 - Sony `ps3_at3tool.exe` from `./storage/ps3_at3tool.exe`
@@ -104,9 +110,10 @@ per-cabinet auth.
 
 ## osu!taiko archives
 
-Place `.osz` files anywhere below `storage/OSU`. A first-level folder such as
-`storage/OSU/Anime` is merged into the matching ESE category (`02 Anime`);
-folders without a matching ESE category are exposed as their own categories.
+Place each `.osz` file directly in a category folder such as
+`storage/SONGS/OSU/Anime`. TJA packages use the matching folder under
+`storage/SONGS/TJA`; both source types are merged into the same plain-name
+category. The eight standard category folders are created automatically.
 
 Only native osu!taiko charts (`Mode: 1`) are indexed. Each OSZ remains one song
 with at most five selected courses. Easy, Normal, Hard, and Oni are always

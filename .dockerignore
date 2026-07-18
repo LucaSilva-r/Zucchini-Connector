@@ -7,4 +7,4 @@ __pycache__
 frontend/node_modules
 frontend/.svelte-kit
 app/static/assets
-storage/ESE-convert
+storage/SONGS/CONVERTED

@@ -15,9 +15,15 @@ def env(name: str, default: str) -> str:
 class Settings:
     def __init__(self) -> None:
         base = Path(__file__).resolve().parents[1]
-        self.ese_root = Path(env("ESE_ROOT", str(base / "storage" / "ESE"))).resolve()
-        self.osu_root = Path(env("OSU_ROOT", str(base / "storage" / "OSU"))).resolve()
-        self.convert_root = Path(env("CONVERT_ROOT", str(base / "storage" / "ESE-convert"))).resolve()
+        self.tja_root = Path(
+            env("TJA_ROOT", str(base / "storage" / "SONGS" / "TJA"))
+        ).resolve()
+        self.osu_root = Path(
+            env("OSU_ROOT", str(base / "storage" / "SONGS" / "OSU"))
+        ).resolve()
+        self.convert_root = Path(
+            env("CONVERT_ROOT", str(base / "storage" / "SONGS" / "CONVERTED"))
+        ).resolve()
         self.cabinets_root = Path(env("CABINETS_ROOT", str(base / "storage" / "cabinets"))).resolve()
         self.ffmpeg_path = env("FFMPEG_PATH", "ffmpeg")
         self.wine_path = env("WINE_PATH", "wine")

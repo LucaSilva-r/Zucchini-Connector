@@ -389,9 +389,9 @@ def _convert_package(entry: dict[str, Any], package_root: Path, source_hash: str
             raise RuntimeError("osu! song has no readable OSZ file.")
     else:
         if not entry.get("audio_path") or not Path(str(entry["audio_path"])).is_file():
-            raise RuntimeError("ESE song has no readable audio file.")
+            raise RuntimeError("TJA song has no readable audio file.")
         if not entry.get("tja_path") or not Path(str(entry["tja_path"])).is_file():
-            raise RuntimeError("ESE song has no readable TJA file.")
+            raise RuntimeError("TJA song has no readable TJA file.")
 
     tmp = package_root.parent / "package.tmp"
     shutil.rmtree(tmp, ignore_errors=True)

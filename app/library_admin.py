@@ -64,15 +64,7 @@ def management_library() -> dict[str, Any]:
 
 
 def upload_categories() -> list[dict[str, str]]:
-    result = [{"id": "root", "title": "Unsorted"}]
-    if settings.ese_root.is_dir():
-        for path in sorted(settings.ese_root.iterdir(), key=lambda p: p.name.casefold()):
-            if path.is_dir() and re.match(r"^\d{2} ", path.name):
-                result.append({
-                    "id": path.name,
-                    "title": re.sub(r"^\d{2}\s+", "", path.name),
-                })
-    return result
+    return [{"id": name, "title": name} for name in catalog.category_names()]
 
 
 async def upload_osz(file: UploadFile, category: str) -> dict[str, Any]:
@@ -98,7 +90,7 @@ async def upload_osz(file: UploadFile, category: str) -> dict[str, Any]:
 async def upload_tja(files: list[UploadFile], category: str) -> dict[str, Any]:
     if not files:
         raise ValueError("Choose a TJA package")
-    destination_dir = _category_path(settings.ese_root, category)
+    destination_dir = _category_path(settings.tja_root, category)
     destination_dir.mkdir(parents=True, exist_ok=True)
     names: set[str] = set()
     for upload in files:
@@ -187,8 +179,7 @@ def _category_path(root: Path, category: str) -> Path:
     valid = {item["id"] for item in upload_categories()}
     if category not in valid:
         raise ValueError("Unknown song category")
-    destination = root if category == "root" else root / category
-    resolved = destination.resolve()
+    resolved = (root / category).resolve()
     resolved.relative_to(root)
     return resolved
 

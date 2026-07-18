@@ -43,7 +43,7 @@ def main() -> int:
     song_id = sys.argv[1] if len(sys.argv) > 1 else None
     entry = catalog.song(song_id) if song_id else (catalog.songs() or [None])[0]
     if not entry:
-        print("no song found (set ese_root / pass a song_id)")
+        print("no song found (set TJA_ROOT / pass a song_id)")
         return 1
     print(f"song: {entry['id']}  {entry['title']}")
     print(f"tja:   {entry.get('tja_path')}")

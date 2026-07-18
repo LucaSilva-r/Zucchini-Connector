@@ -30,7 +30,7 @@ COPY app /app/app
 COPY --from=frontend-build /app/static /app/app/static
 COPY docker/connector-entrypoint.sh /usr/local/bin/connector-entrypoint
 RUN chmod +x /usr/local/bin/connector-entrypoint
-RUN mkdir -p /app/storage/ESE /app/storage/OSU /app/storage/ESE-convert /app/storage/cabinets
+RUN mkdir -p /app/storage/SONGS/TJA /app/storage/SONGS/OSU /app/storage/SONGS/CONVERTED /app/storage/cabinets
 
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/connector-entrypoint"]
