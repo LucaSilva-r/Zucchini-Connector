@@ -9,7 +9,9 @@ services:
     # outside the container. Export UID/GID (id -u / id -g) to override.
     user: "${UID:-1000}:${GID:-1000}"
     environment:
-      HOME: /tmp
+      # The non-root service user cannot chmod /tmp itself. Wine needs a
+      # private, user-owned HOME, which the entrypoint creates on startup.
+      HOME: /tmp/connector-home
       CONNECTOR_API_TOKEN: "${CONNECTOR_API_TOKEN:-}"
       CONNECTOR_AT3_BITRATE_KBPS: "${CONNECTOR_AT3_BITRATE_KBPS:-256}"
       CONNECTOR_CONVERSION_WORKERS: "${CONNECTOR_CONVERSION_WORKERS:-4}"

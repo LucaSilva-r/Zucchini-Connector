@@ -22,7 +22,11 @@ from tja2fumen.converters import fix_dk_note_types_course
 
 MAX_OSU_BYTES = 16 * 1024 * 1024
 MAX_AUDIO_BYTES = 512 * 1024 * 1024
-CONVERTER_VERSION = 3
+# Green's fumen loader has a fixed pool of 300 measure records.  Writing a
+# larger count corrupts adjacent loader state instead of failing gracefully.
+MAX_FUMEN_MEASURES = 300
+SCORE_TARGET = 1_000_000
+CONVERTER_VERSION = 4
 
 COURSES = (
     ("e", "Easy", 2),
@@ -284,11 +288,26 @@ def fumen_from_osu(raw: bytes, course_name: str, level: int) -> FumenCourse:
         if event.note_type.lower().startswith(("don", "ka")):
             combo_notes += 1
 
+    # osu! files do not carry TJA SCOREINIT/SCOREDIFF metadata.  A zero value
+    # makes Green award no points, so use the same Shin-Uchi-style fallback as
+    # other Taiko players: a constant per-note value targeting one million.
+    score_init = _shinuchi_score_init(combo_notes)
+    for measure in measures:
+        for note in measure.branches["normal"].notes:
+            if note.note_type.lower().startswith(("don", "ka")):
+                note.score_init = score_init
+                note.score_diff = 0
+
     header = FumenHeader(order=">")
     header.b512_b515_number_of_measures = len(measures)
     header.set_hp_bytes(combo_notes, course_name, level)
     header.set_timing_windows(course_name)
-    fumen = FumenCourse(header=header, measures=measures)
+    fumen = FumenCourse(
+        header=header,
+        measures=measures,
+        score_init=score_init,
+        score_diff=0,
+    )
     fix_dk_note_types_course(fumen)
     return fumen
 
@@ -514,7 +533,8 @@ def _measure_boundaries(
     last_event = max(event.start + event.duration for event in events)
     final_red = _active_red(red_points, last_event)
     end = last_event + final_red.beat_length * final_red.meter
-    values = {start, end}
+    required = {start, end}
+    natural_barlines: set[float] = {start}
     barlines = {_time_key(start)}
     for idx, red in enumerate(red_points):
         if red.offset > end:
@@ -523,19 +543,94 @@ def _measure_boundaries(
         cursor = max(start, red.offset)
         measure_length = red.beat_length * red.meter
         while cursor < segment_end - 0.001:
-            values.add(cursor)
+            natural_barlines.add(cursor)
             barlines.add(_time_key(cursor))
             cursor += measure_length
-        values.add(segment_end)
+        required.add(segment_end)
         if idx + 1 < len(red_points) and red_points[idx + 1].offset <= end:
             barlines.add(_time_key(red_points[idx + 1].offset))
+
+    # Kiai can change on inherited timing points.  Those transitions affect
+    # scoring and must remain exact even when a map contains thousands of
+    # smooth-SV points.
+    kiai = _timing_effects(points, start)[1]
     for point in points:
-        if start < point.offset < end:
-            values.add(point.offset)
-    boundaries = sorted(values)
+        if point.offset <= start + 0.001:
+            continue
+        if point.offset >= end - 0.001:
+            break
+        if point.kiai != kiai:
+            required.add(point.offset)
+        kiai = point.kiai
+
+    required_boundaries = sorted(required)
+    required_measures = len(required_boundaries) - 1
+    if required_measures > MAX_FUMEN_MEASURES:
+        raise ValueError(
+            "osu! chart requires "
+            f"{required_measures} BPM/kiai timing sections, but the game "
+            f"supports at most {MAX_FUMEN_MEASURES}."
+        )
+
+    # Ordinary barlines are musically useful but may be thinned for a song
+    # longer than 300 natural measures.  Note timestamps remain exact because
+    # their positions are recalculated relative to whichever boundary remains.
+    available = MAX_FUMEN_MEASURES + 1 - len(required_boundaries)
+    selected_barlines = _evenly_sample(
+        [value for value in natural_barlines if value not in required],
+        available,
+    )
+    structural = required | set(selected_barlines)
+
+    # A fumen measure stores only one scroll speed.  Mid-measure inherited
+    # timing points are therefore useful approximation boundaries, not hard
+    # structural requirements.  Keep all of them when possible; otherwise
+    # sample them evenly across the song to stay inside the game's fixed pool.
+    scroll_boundaries: list[float] = []
+    scroll = _timing_effects(points, start)[0]
+    for point in points:
+        if point.offset <= start + 0.001:
+            continue
+        if point.offset >= end - 0.001:
+            break
+        new_scroll = scroll
+        if point.uninherited:
+            new_scroll = 1.0
+        elif point.beat_length < 0:
+            new_scroll = max(0.01, -100.0 / point.beat_length)
+        if not math.isclose(new_scroll, scroll, rel_tol=1e-9, abs_tol=1e-9):
+            if point.offset not in structural:
+                scroll_boundaries.append(point.offset)
+            scroll = new_scroll
+
+    available = MAX_FUMEN_MEASURES + 1 - len(structural)
+    selected_scroll = _evenly_sample(scroll_boundaries, available)
+    boundaries = sorted(structural | set(selected_scroll))
     if len(boundaries) < 2:
         raise ValueError("Could not construct measures for osu!taiko chart.")
     return boundaries, barlines
+
+
+def _evenly_sample(values: list[float], limit: int) -> list[float]:
+    """Return at most ``limit`` ordered values spread over the full input."""
+    values = sorted(set(values))
+    if limit <= 0:
+        return []
+    if len(values) <= limit:
+        return values
+    if limit == 1:
+        return [values[len(values) // 2]]
+    return [
+        values[round(index * (len(values) - 1) / (limit - 1))]
+        for index in range(limit)
+    ]
+
+
+def _shinuchi_score_init(combo_notes: int) -> int:
+    """Constant per-note score, rounded up to 10, for a ~1M perfect score."""
+    if combo_notes <= 0:
+        return 0
+    return min(65535, math.ceil(SCORE_TARGET / combo_notes / 10) * 10)
 
 
 def _time_key(value: float) -> int:

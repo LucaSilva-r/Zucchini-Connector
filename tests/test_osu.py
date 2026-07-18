@@ -6,6 +6,8 @@ import zipfile
 from pathlib import Path
 
 from app import osu
+from tja2fumen.parsers import parse_fumen
+from tja2fumen.writers import write_fumen
 
 
 def beatmap(mode: int = 1) -> bytes:
@@ -183,6 +185,89 @@ class OsuTests(unittest.TestCase):
         )
         self.assertEqual(effective_first_note, 1000)
         self.assertEqual({note.note_type.lower()[:2] for note in notes}, {"do", "ka"})
+
+    def test_fumen_assigns_nonzero_shinuchi_score_to_hit_notes(self) -> None:
+        fumen = osu.fumen_from_osu(beatmap(), "Oni", 6)
+        notes = [
+            note
+            for measure in fumen.measures
+            for note in measure.branches["normal"].notes
+        ]
+
+        self.assertEqual(fumen.score_init, 31_250)
+        self.assertEqual(fumen.score_diff, 0)
+        self.assertEqual({note.score_init for note in notes}, {31_250})
+        self.assertEqual({note.score_diff for note in notes}, {0})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "score.bin"
+            write_fumen(str(path), fumen)
+            serialized = parse_fumen(str(path))
+        serialized_notes = [
+            note
+            for measure in serialized.measures
+            for note in measure.branches["normal"].notes
+        ]
+        self.assertEqual({note.score_init for note in serialized_notes}, {31_250})
+        self.assertEqual({note.score_diff for note in serialized_notes}, {0})
+
+    def test_dense_inherited_timing_points_stay_within_game_limit(self) -> None:
+        dense_points = "\n".join(
+            f"{1001 + index * 5},{-100 + (index % 50)},4,1,0,100,0,0"
+            for index in range(1000)
+        )
+        raw = beatmap().replace(
+            b"1000,500,4,1,0,100,1,0",
+            ("1000,500,4,1,0,100,1,0\n" + dense_points).encode(),
+        )
+
+        fumen = osu.fumen_from_osu(raw, "Oni", 6)
+
+        self.assertLessEqual(len(fumen.measures), osu.MAX_FUMEN_MEASURES)
+        self.assertEqual(fumen.header.b512_b515_number_of_measures, 300)
+
+    def test_long_chart_thins_natural_barlines_to_game_limit(self) -> None:
+        objects = "\n".join(
+            f"256,192,{1000 + index * 2000},1,0,0:0:0:0:"
+            for index in range(302)
+        )
+        raw = beatmap().split(b"[HitObjects]\n", 1)[0] + (
+            "[HitObjects]\n" + objects + "\n"
+        ).encode()
+
+        fumen = osu.fumen_from_osu(raw, "Oni", 6)
+
+        self.assertEqual(len(fumen.measures), osu.MAX_FUMEN_MEASURES)
+        notes = [
+            note
+            for measure in fumen.measures
+            for note in measure.branches["normal"].notes
+        ]
+        self.assertEqual(len(notes), 302)
+        effective_times = sorted(
+            measure.offset_start
+            + 4 * 60_000 / measure.bpm
+            + note.pos
+            for measure in fumen.measures
+            for note in measure.branches["normal"].notes
+        )
+        self.assertEqual(
+            effective_times,
+            [1000 + index * 2000 for index in range(302)],
+        )
+
+    def test_too_many_bpm_sections_are_rejected(self) -> None:
+        red_points = "\n".join(
+            f"{1000 + index * 10},{500 + index % 2},4,1,0,100,1,0"
+            for index in range(302)
+        )
+        raw = beatmap().replace(
+            b"1000,500,4,1,0,100,1,0",
+            red_points.encode(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "BPM/kiai timing sections"):
+            osu.fumen_from_osu(raw, "Oni", 6)
 
 
 if __name__ == "__main__":
