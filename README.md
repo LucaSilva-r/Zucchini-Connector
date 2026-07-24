@@ -11,8 +11,10 @@ conversion service. Two jobs:
    operator flags) without opening the cab or attaching a controller.
 
 The service keeps its TJA and OSZ sources read-only and writes generated
-packages into `storage/SONGS/CONVERTED`; per-cabinet management state lives in
-`storage/cabinets/<cabinet_id>.json`.
+packages into `storage/SONGS/CONVERTED`. Durable scan, conversion-job, package,
+and cabinet-package metadata lives in `storage/connector.db`; the existing
+`storage/cabinets/<cabinet_id>.json` files remain the rolling-compatible
+cabinet control state.
 
 ## Run
 
@@ -72,6 +74,7 @@ The compose file mounts:
 - osu! beatmap archives from `./storage/SONGS/OSU`
 - conversion cache at `./storage/SONGS/CONVERTED`
 - cabinet management state at `./storage/cabinets`
+- uploaded Zucchini version history at `./storage/updates`
 - local TLS certificates at `./storage/certificates`
 - Sony `ps3_at3tool.exe` from `./storage/ps3_at3tool.exe`
 
@@ -90,13 +93,22 @@ The response carries whatever the operator queued in the UI:
   are applied through the same validation the config file parser uses, then
   saved. Network keys apply live; features/patches at next boot.
 - **Song selection**: once an operator saves a selection the cabinet is
-  *managed*. A separate worker converts, downloads, and pre-renders the entire
-  immutable selection only while the game is at attract; the 5 s heartbeat
-  continues reporting its phase and song-count progress. The completed set is
-  activated in one persisted index update, then deselected cache directories
-  are garbage-collected. Operator edits made while a job runs are saved as the
-  latest queued selection and promoted only after the active sequence is
-  acknowledged, so a large sync cannot change underneath the cabinet.
+  *managed*. A separate worker converts and downloads into an isolated staging
+  area during any game state; gameplay no longer has to sit in attract for
+  network work to progress. Every asset is checked against the package
+  manifest's size and SHA-1. Only the short directory swap/reload waits for
+  attract and service mode. The previous working package remains playable if
+  conversion, transfer, verification, or activation fails. Interrupted
+  transfers resume, interrupted swaps recover from their rollback directory,
+  and the 5 s heartbeat continues reporting phase and song-count progress.
+  Operator edits made while a job runs are retained as the next desired
+  sequence, separately from the sequence that is actually active.
+- **Zucchini updates**: an operator can upload any signed `zucchini.sprx` with
+  a version and change note, or select an earlier stored build to roll back a
+  cabinet. The Connector rejects a HEN/GEX signing-flavor mismatch and stores
+  artifacts by SHA-1. The cabinet waits for attract, streams the selected file,
+  verifies its header, size, and SHA-1, atomically swaps the runtime plugin,
+  then restarts. Completion is acknowledged after the new plugin boots.
 
 Changes queued while a cabinet is offline persist and are delivered on its
 next poll. At boot the plugin polls before the game reads chassisinfo.xml
@@ -122,12 +134,41 @@ Ura is optional. Charts are matched using their calculated offline osu!taiko
 difficulty and common difficulty names. The displayed Taiko level is
 `round(osu!taiko stars * 1.5)`, clamped to 1–10.
 
-Set `CONNECTOR_API_TOKEN` to require `Authorization: Bearer <token>`.
+Set `CONNECTOR_API_TOKEN` to require `Authorization: Bearer <token>` from
+cabinet clients. The browser-facing song library and selection tools are
+available to anyone who can reach the connector. Privileged actions (remote
+control, cabinet configuration, Zucchini updates, and forgetting a cabinet)
+require `CONNECTOR_MANAGEMENT_PIN`. The unlock is stored in an HttpOnly,
+SameSite cookie for eight hours; change the lifetime with
+`CONNECTOR_MANAGEMENT_SESSION_SECONDS`. For compatibility, the API token is
+also accepted as the management PIN when no dedicated PIN is configured.
+Repeated wrong PIN attempts are rate-limited per client.
+
+Cabinets keep one authenticated WebSocket open for remote input and management
+traffic. Song selections and configuration snapshots are pushed over that
+channel, while conversion manifests and asset bytes continue to use HTTP.
+Compact operation telemetry includes the active song, asset byte progress, and
+measured transfer speed. Dashboard pages subscribe to a separate read-only
+events socket, so progress updates appear immediately. The periodic HTTP poll
+remains as a slower reboot/reconnect reconciliation path and carries complete
+inventory/configuration snapshots.
 
 Batch conversion uses a bounded worker pool so several queued songs can be
 prepared in parallel while clients download assets sequentially. Set
 `CONNECTOR_CONVERSION_WORKERS` to control concurrency (default: `4` in Docker,
 or up to `4` based on detected CPUs outside Docker).
+
+Package identity is content-addressed: the source-content revision is combined
+with `CONNECTOR_PACKAGE_RECIPE_VERSION`, manifest schema, chart endianness, and
+audio settings. Bump `CONNECTOR_PACKAGE_RECIPE_VERSION` whenever converter
+behavior can change generated bytes. Existing packages whose asset hashes still
+match a new manifest are adopted without downloading them again.
+
+Conversion attempts and retry deadlines survive connector restarts in SQLite.
+Set `CONNECTOR_DATABASE_PATH` to move the database,
+`CONNECTOR_CONVERSION_TIMEOUT_SECONDS` to bound a converter subprocess
+(default 900), and `CONNECTOR_LIBRARY_FULL_RESCAN_SECONDS` to control the
+watchdog safety scan (default 300).
 
 The FastAPI app serves HTTPS directly on `CONNECTOR_HTTPS_PORT` (`8443` by
 default), so it does not conflict with TaikOnline's local `443`. The container

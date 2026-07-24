@@ -159,7 +159,7 @@ command -v ffmpeg >/dev/null 2>&1 || echo "[run] WARNING: ffmpeg not found — s
 command -v wine   >/dev/null 2>&1 || echo "[run] WARNING: wine not found — song conversion will fail"
 [ -f storage/ps3_at3tool.exe ]    || echo "[run] WARNING: storage/ps3_at3tool.exe missing — song conversion will fail"
 
-mkdir -p storage/SONGS/TJA storage/SONGS/OSU storage/SONGS/CONVERTED storage/cabinets
+mkdir -p storage/SONGS/TJA storage/SONGS/OSU storage/SONGS/CONVERTED storage/cabinets storage/updates
 
 cert_dir="storage/certificates/local"
 if [ -e "$cert_dir/server.key" ] && [ ! -r "$cert_dir/server.key" ]; then

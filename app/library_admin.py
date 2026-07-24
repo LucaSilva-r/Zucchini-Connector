@@ -26,12 +26,11 @@ _AVAILABLE_CACHE: tuple[tuple[str, frozenset[str]], dict[str, Any]] | None = Non
 
 def available_library() -> dict[str, Any]:
     global _AVAILABLE_CACHE
-    broken = converter.broken_song_ids()
     source = catalog.library()
-    cache_key = (str(source["hash"]), frozenset(broken))
+    cache_key = (str(source["hash"]), frozenset())
     if _AVAILABLE_CACHE is not None and _AVAILABLE_CACHE[0] == cache_key:
         return _AVAILABLE_CACHE[1]
-    songs = [song for song in source["songs"] if song["id"] not in broken]
+    songs = list(source["songs"])
     counts: dict[str, int] = {}
     for song in songs:
         category = str(song["category"])

@@ -47,16 +47,33 @@ class CatalogLibraryTests(unittest.TestCase):
         for song in library["songs"]:
             self.assertEqual(len(song["rev"]), 12)
 
-    def test_rev_tracks_source_hash_and_converter_version(self) -> None:
+    def test_rev_tracks_source_and_explicit_recipe_version(self) -> None:
         tja = {"id": "tja_one", "source_path": "a/b"}
         osz = {"id": "osu_two", "source_path": "c/d", "source_type": "osz"}
         self.assertNotEqual(catalog.source_hash(tja), catalog.source_hash(osz))
         self.assertEqual(catalog.source_hash(osz), catalog.source_hash(dict(osz)))
-        with patch.object(catalog.osu, "CONVERTER_VERSION", 9999):
-            catalog._source_hash_cached.cache_clear()
+        with patch.object(settings, "package_recipe_version", "9999"):
             bumped = catalog.source_hash(osz)
-        catalog._source_hash_cached.cache_clear()
         self.assertNotEqual(bumped, catalog.source_hash(osz))
+
+    def test_library_exposes_full_package_revision(self) -> None:
+        categories = [{"id": "Pop", "title": "Pop", "song_count": 1}]
+        songs = [{
+            "id": "osu_two",
+            "title": "osu! song",
+            "subtitle": "",
+            "source_path": "Pop/song.osz",
+            "source_type": "osz",
+            "courses": [],
+        }]
+        with patch.object(catalog, "categories", return_value=categories), \
+             patch.object(catalog, "songs", return_value=songs):
+            library = catalog.refresh_library()
+        self.assertEqual(len(library["songs"][0]["package_revision"]), 40)
+        self.assertEqual(
+            library["songs"][0]["rev"],
+            library["songs"][0]["package_revision"][:12],
+        )
 
     def test_plain_category_names_follow_game_menu_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

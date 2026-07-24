@@ -5,6 +5,7 @@ export type Cabinet = {
   game: string;
   game_name: string;
   version: string;
+  flavor: string;
   last_seen: number;
   have: string[];
   reported_cfg: string;
@@ -13,6 +14,16 @@ export type Cabinet = {
   queued_selection: string[] | null;
   selection_seq: number;
   acked_seq: number;
+  sync_proto: number;
+  desired_ack: number;
+  active_seq: number;
+  verify_generation: number;
+  verify_ack: number;
+  package_states: Record<string, {
+    revision: string;
+    state: string;
+    error_code: string;
+  }>;
   operation_seq: number;
   operation_phase: string;
   operation_done: number;
@@ -20,7 +31,42 @@ export type Cabinet = {
   operation_failed: number;
   operation_song: string;
   operation_error: string;
+  transfer_active: boolean;
+  transfer_asset: string;
+  transfer_done: number;
+  transfer_total: number;
+  transfer_bps: number;
   config_pending: Record<string, string>;
+  update_pending: {
+    id: string;
+    sha1: string;
+    version: string;
+    size: number;
+    filename: string;
+    flavor: string;
+    note: string;
+    uploaded_at: number;
+  } | null;
+  update_dispatched: boolean;
+  update_installed_id: string;
+  update_installed_version: string;
+  update_phase: string;
+  update_done: number;
+  update_total: number;
+  update_error: string;
+  control_online: boolean;
+  control_operator: boolean;
+};
+
+export type ZucchiniUpdate = {
+  id: string;
+  sha1: string;
+  version: string;
+  size: number;
+  filename: string;
+  flavor: string;
+  note: string;
+  uploaded_at: number;
 };
 
 export type SongCategory = { id: string; title: string; song_count: number };

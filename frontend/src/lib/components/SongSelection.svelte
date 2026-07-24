@@ -1,5 +1,6 @@
 <script lang="ts">
   import CheckCheckIcon from "@lucide/svelte/icons/check-check";
+  import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
   import LoaderCircleIcon from "@lucide/svelte/icons/loader-circle";
   import SearchIcon from "@lucide/svelte/icons/search";
   import { saveSelection } from "$lib/api.js";
@@ -130,9 +131,21 @@
             </div>
             <div class="grid gap-0.5 sm:grid-cols-2 2xl:grid-cols-3">
               {#each songs as song (song.id)}
-                <Label class="flex cursor-pointer items-center gap-2.5 rounded-md border border-transparent px-2 py-1 font-normal transition-colors hover:border-border hover:bg-accent/50">
+                {@const packageState = cabinet.package_states[song.id]}
+                {@const blocked = packageState?.state === "blocked"}
+                <Label
+                  class={`flex cursor-pointer items-center gap-2.5 rounded-md border px-2 py-1 font-normal transition-colors hover:border-border hover:bg-accent/50 ${blocked ? "border-destructive/35 bg-destructive/5" : "border-transparent"}`}
+                  title={blocked
+                    ? `Blocked on this cabinet: ${packageState.error_code || "download or verification failed"}`
+                    : song.id}
+                >
                   <Checkbox checked={draftSet.has(song.id)} onCheckedChange={(value) => setSong(song.id, value === true)} />
                   <span class="min-w-0 truncate text-sm" title={song.id}>{song.display_title || song.title}</span>
+                  {#if blocked}
+                    <Badge variant="destructive" class="ml-auto h-5 shrink-0 gap-1 px-1.5 text-[10px]">
+                      <CircleAlertIcon class="size-3" /> Blocked
+                    </Badge>
+                  {/if}
                 </Label>
               {/each}
             </div>

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import KeyRoundIcon from "@lucide/svelte/icons/key-round";
   import MoonIcon from "@lucide/svelte/icons/moon";
   import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
   import LibraryBigIcon from "@lucide/svelte/icons/library-big";
@@ -10,17 +9,13 @@
   import { ApiError, getCabinets, getLibrary } from "$lib/api.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
-  import { Input } from "$lib/components/ui/input/index.js";
-  import { Label } from "$lib/components/ui/label/index.js";
   import { Skeleton } from "$lib/components/ui/skeleton/index.js";
   import CabinetDashboard from "$lib/components/CabinetDashboard.svelte";
   import CabinetList from "$lib/components/CabinetList.svelte";
   import LibraryManager from "$lib/components/LibraryManager.svelte";
   import type { Cabinet, Library } from "$lib/types.js";
 
-  const storedToken = localStorage.getItem("connector_token") || "";
-  let token = $state(storedToken);
-  let tokenDraft = $state(storedToken);
+  const token = "";
   let cabinets = $state<Cabinet[]>([]);
   let library = $state<Library | null>(null);
   let selectedId = $state<string | null>(null);
@@ -48,11 +43,9 @@
     error = "";
     try {
       const [cabinetResponse, loadedLibrary] = await Promise.all([
-        getCabinets(tokenDraft.trim()),
-        getLibrary(tokenDraft.trim()),
+        getCabinets(token),
+        getLibrary(token),
       ]);
-      token = tokenDraft.trim();
-      localStorage.setItem("connector_token", token);
       cabinets = cabinetResponse.cabinets;
       library = loadedLibrary;
       authorized = true;
@@ -61,9 +54,7 @@
       }
     } catch (reason) {
       authorized = false;
-      error = reason instanceof ApiError && reason.status === 401
-        ? "The API token was rejected."
-        : reason instanceof Error ? reason.message : "Could not reach the connector.";
+      error = reason instanceof Error ? reason.message : "Could not reach the connector.";
     } finally {
       loading = false;
     }
@@ -95,12 +86,6 @@
   function removeCabinet(id: string) {
     cabinets = cabinets.filter((cabinet) => cabinet.cabinet_id !== id);
     selectedId = cabinets[0]?.cabinet_id ?? null;
-  }
-
-  function changeToken() {
-    authorized = false;
-    tokenDraft = token;
-    error = "";
   }
 
   onMount(() => {
@@ -136,7 +121,6 @@
           <Button variant={view === "library" ? "secondary" : "ghost"} size="sm" onclick={() => view = "library"}><LibraryBigIcon /> Song library</Button>
         </div>
         <Button variant="ghost" size="icon" aria-label="Refresh cabinets" onclick={() => refreshCabinets(false)}><RefreshCwIcon class={refreshing ? "animate-spin" : ""} /></Button>
-        <Button variant="ghost" size="sm" onclick={changeToken}><KeyRoundIcon /> Token</Button>
       {/if}
       <Button variant="ghost" size="icon" aria-label="Toggle color theme" onclick={() => { dark = !dark; applyTheme(); }}>
         {#if dark}<SunIcon />{:else}<MoonIcon />{/if}
@@ -150,15 +134,14 @@
     <div class="mx-auto grid min-h-[70vh] max-w-md place-items-center">
       <Card.Root class="operator-panel w-full">
         <Card.Header>
-          <Card.Title>Connect to your cabinet fleet</Card.Title>
-          <Card.Description>Enter the bearer token configured on this connector.</Card.Description>
+          <Card.Title>Could not load the connector</Card.Title>
+          <Card.Description>The public song and cabinet dashboard is unavailable.</Card.Description>
         </Card.Header>
         <Card.Content>
-          <form class="grid gap-4" onsubmit={(event) => { event.preventDefault(); connect(); }}>
-            <div class="grid gap-2"><Label for="api-token">API token</Label><Input id="api-token" type="password" bind:value={tokenDraft} autocomplete="current-password" autofocus /></div>
+          <div class="grid gap-4">
             {#if error}<p class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>{/if}
-            <Button type="submit" disabled={loading}>{loading ? "Connecting…" : "Connect"}</Button>
-          </form>
+            <Button onclick={connect} disabled={loading}>{loading ? "Retrying…" : "Retry"}</Button>
+          </div>
         </Card.Content>
       </Card.Root>
     </div>

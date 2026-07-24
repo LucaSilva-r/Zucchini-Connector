@@ -10,6 +10,7 @@ from threading import Event, RLock, Thread
 from typing import Any
 
 from .config import settings
+from . import database
 from . import osu
 
 
@@ -44,6 +45,8 @@ _WATCH_ACTIVE = False
 # songs still appear without a restart, just slower.
 _LIBRARY_TTL_SECONDS = 60.0
 _LIBRARY_AT = 0.0
+PACKAGE_MANIFEST_SCHEMA = 3
+PACKAGE_FUMEN_ENDIAN = "big"
 
 
 # Canonical Taiko genre folders, in game menu order. Created under both song
@@ -154,11 +157,17 @@ def refresh_library() -> dict[str, Any]:
     """Rescan the song roots and swap in a fresh library payload."""
     global _LIBRARY_CACHE, _LIBRARY_AT
     with _LIBRARY_LOCK:
+        generation = database.begin_scan()
         _invalidate_osz_files()
         _SONGS_CACHE.clear()
-        built = _build_library()
+        try:
+            built = _build_library()
+        except Exception as exc:
+            database.finish_scan(generation, [], error=str(exc))
+            raise
         _LIBRARY_CACHE = built
         _LIBRARY_AT = time.monotonic()
+        database.finish_scan(generation, built["songs"])
         return built
 
 
@@ -191,18 +200,20 @@ def start_library_watch() -> bool:
 
     def _worker() -> None:
         while True:
-            _LIBRARY_DIRTY.wait()
-            # Debounce: a song drop is many events (copies, temp files); wait
-            # until the filesystem has been quiet for a moment, then rebuild.
-            while True:
-                _LIBRARY_DIRTY.clear()
-                time.sleep(2.0)
-                if not _LIBRARY_DIRTY.is_set():
-                    break
+            changed = _LIBRARY_DIRTY.wait(settings.library_full_rescan_seconds)
+            if changed:
+                # Debounce: a song drop is many events (copies, temp files);
+                # wait until the filesystem has been quiet for a moment.
+                while True:
+                    _LIBRARY_DIRTY.clear()
+                    time.sleep(2.0)
+                    if not _LIBRARY_DIRTY.is_set():
+                        break
             try:
                 built = refresh_library()
                 print(
-                    f"[connector] library rescan: {len(built['songs'])} songs",
+                    f"[connector] {'watch' if changed else 'safety'} rescan: "
+                    f"{len(built['songs'])} songs",
                     flush=True,
                 )
             except Exception as exc:  # keep the watch alive on scan errors
@@ -242,10 +253,12 @@ def _build_library() -> dict[str, Any]:
                     # Flat "id:stars,..." in canonical order so the PS3 gets star
                     # counts straight from the index — no per-song conversion.
                     "diffs": _diffs_str(s.get("courses") or []),
-                    # Short source_hash prefix. The PS3 compares this against
-                    # its cached manifest's source_hash to spot songs whose
-                    # source (or converter) changed, with no extra requests.
-                    "rev": source_hash(s)[:12],
+                    # `rev` remains for old cabinets. Protocol-2 cabinets use
+                    # the complete package revision, avoiding prefix-only
+                    # freshness decisions.
+                    "rev": package_revision(s)[:12],
+                    "source_revision": source_revision(s),
+                    "package_revision": package_revision(s),
                 }
             )
     payload = {"categories": cat_out, "songs": song_out}
@@ -319,8 +332,13 @@ def _remember_songs(entries: list[dict[str, Any]]) -> None:
             _SONG_INDEX[str(entry["id"])] = entry
 
 
-def source_hash(entry: dict[str, Any]) -> str:
-    files: list[tuple[str, str, int, int]] = []
+def source_revision(entry: dict[str, Any]) -> str:
+    """Stable content revision for the inputs, independent of mtimes.
+
+    The song id already captures its library path. Re-copying identical bytes
+    must therefore not invalidate every cabinet package.
+    """
+    files: list[tuple[str, str, int, int, int, int]] = []
     for key in ("tja_path", "audio_path", "osz_path"):
         path_value = entry.get(key)
         if not path_value:
@@ -329,34 +347,58 @@ def source_hash(entry: dict[str, Any]) -> str:
         if not path.is_file():
             continue
         st = path.stat()
-        files.append((str(path), path.name, st.st_size, st.st_mtime_ns))
-    return _source_hash_cached(
+        files.append((
+            str(path), path.name, st.st_size, st.st_mtime_ns,
+            st.st_ctime_ns, st.st_ino,
+        ))
+    return _source_revision_cached(
         str(entry.get("source_path", "")),
-        entry.get("source_type") == "osz",
         tuple(files),
     )
 
 
 @functools.lru_cache(maxsize=65536)
-def _source_hash_cached(
+def _source_revision_cached(
     source_path: str,
-    is_osz: bool,
-    files: tuple[tuple[str, str, int, int], ...],
+    files: tuple[tuple[str, str, int, int, int, int], ...],
 ) -> str:
-    """Full-file sha1, memoized on (path, size, mtime) so /library can embed a
-    per-song rev without re-reading every source on each request. The digest
-    input must stay byte-identical to the historical formula: changing it would
-    flip every stored manifest's source_hash and force a global re-download."""
+    """Full-file SHA-1, memoized on path metadata but digesting stable bytes."""
     h = hashlib.sha1()
-    h.update(source_path.encode())
-    if is_osz:
-        h.update(f"|osu-converter-v{osu.CONVERTER_VERSION}|".encode())
-    for path, name, size, mtime_ns in files:
-        h.update(f"|{name}|{size}|{mtime_ns // 1_000_000_000}|".encode())
+    h.update(b"zucchini-source-v1\0")
+    if not files:
+        # Preserve distinct revisions for incomplete/broken catalog entries.
+        h.update(source_path.encode("utf-8"))
+    for path, name, _size, _mtime_ns, _ctime_ns, _inode in files:
+        h.update(b"\0")
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
         with open(path, "rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 h.update(chunk)
     return h.hexdigest()
+
+
+def package_revision(entry: dict[str, Any]) -> str:
+    """Revision of generated output, including its explicit conversion recipe."""
+    recipe = {
+        "source_revision": source_revision(entry),
+        "recipe_version": settings.package_recipe_version,
+        "manifest_schema": PACKAGE_MANIFEST_SCHEMA,
+        "fumen_endian": PACKAGE_FUMEN_ENDIAN,
+        "audio_bitrate_kbps": settings.audio_bitrate_kbps,
+    }
+    return hashlib.sha1(
+        json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def source_hash(entry: dict[str, Any]) -> str:
+    """Legacy name: manifests and old clients now treat this as package revision."""
+    return package_revision(entry)
+
+
+# Preserve the old test/debug cache-clear hook while callers migrate.
+_source_hash_cached = _source_revision_cached
 
 
 def public_song(entry: dict[str, Any]) -> dict[str, Any]:

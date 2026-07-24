@@ -7,10 +7,11 @@ import shutil
 import struct
 import subprocess
 import tempfile
+from functools import lru_cache
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
 from typing import Any
 
 from tja2fumen.constants import COURSE_IDS
@@ -18,7 +19,7 @@ from tja2fumen.converters import convert_tja_to_fumen, fix_dk_note_types_course
 from tja2fumen.parsers import parse_tja
 from tja2fumen.writers import write_fumen
 
-from . import cabinets, catalog, osu
+from . import catalog, database, osu
 from .config import settings
 
 
@@ -31,6 +32,15 @@ _CONVERSION_POOL = ThreadPoolExecutor(
 _CONVERSION_FUTURES: dict[str, Future[None]] = {}
 _CONVERSION_LOCK = RLock()
 _BROKEN_IDS: set[str] = set()
+_RETRY_STOP = Event()
+_RETRY_THREAD: Thread | None = None
+
+
+class ConversionError(RuntimeError):
+    def __init__(self, code: str, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 def enqueue(song_id: str) -> dict[str, Any]:
@@ -88,7 +98,27 @@ def enqueue_many(song_ids: list[str]) -> dict[str, int | str]:
 
 
 def shutdown() -> None:
+    _RETRY_STOP.set()
     _CONVERSION_POOL.shutdown(wait=False, cancel_futures=True)
+
+
+def resume_jobs() -> None:
+    """Requeue durable jobs left behind by a connector restart."""
+    global _RETRY_THREAD
+    for song_id in database.recoverable_jobs():
+        enqueue(song_id)
+    if _RETRY_THREAD is None or not _RETRY_THREAD.is_alive():
+        _RETRY_STOP.clear()
+        _RETRY_THREAD = Thread(
+            target=_retry_loop, daemon=True, name="tjarepo-convert-retry"
+        )
+        _RETRY_THREAD.start()
+
+
+def _retry_loop() -> None:
+    while not _RETRY_STOP.wait(5.0):
+        for song_id in database.due_jobs():
+            enqueue(song_id)
 
 
 def _conversion_done(song_id: str, future: Future[None]) -> None:
@@ -132,6 +162,9 @@ def prepare(song_id: str, *, retry: bool = False) -> dict[str, Any]:
         "updated_at": _now(),
     }
     _write_json(_status_path(song_id), queued)
+    database.record_job(
+        song_id, catalog.package_revision(entry), "queued"
+    )
     return queued
 
 
@@ -183,9 +216,23 @@ def convert(song_id: str) -> None:
         "source_hash": catalog.source_hash(entry),
         "updated_at": _now(),
     })
+    database.record_job(
+        song_id,
+        catalog.package_revision(entry),
+        "processing",
+        attempt_delta=1,
+        lease_expires_at=int(datetime.now(timezone.utc).timestamp())
+        + settings.conversion_timeout_seconds
+        + 60,
+    )
 
     try:
-        manifest = _convert_package(entry, _package_root(song_id), catalog.source_hash(entry))
+        manifest = _convert_package(
+            entry,
+            _package_root(song_id),
+            catalog.source_revision(entry),
+            catalog.package_revision(entry),
+        )
         _write_json(_manifest_path(song_id), manifest)
         _write_json(_status_path(song_id), {
             "status": "ready",
@@ -195,21 +242,53 @@ def convert(song_id: str) -> None:
             "manifest": manifest,
             "updated_at": _now(),
         })
+        database.record_package(song_id, manifest, "ready")
+        database.record_job(
+            song_id, str(manifest["package_revision"]), "ready",
+            retryable=False,
+        )
         with _CONVERSION_LOCK:
             _BROKEN_IDS.discard(song_id)
     except Exception as exc:
+        retryable = not isinstance(exc, ConversionError) or exc.retryable
+        error_code = (
+            exc.code if isinstance(exc, ConversionError) else "conversion_failed"
+        )
+        state = "retrying" if retryable else "failed"
         shutil.rmtree(_package_root(song_id).parent / "package.tmp", ignore_errors=True)
         _write_json(_status_path(song_id), {
-            "status": "failed",
+            "status": state,
             "song_id": song_id,
             "title": entry["title"],
             "source_hash": catalog.source_hash(entry),
+            "error_code": error_code,
+            "retryable": retryable,
             "message": str(exc),
             "updated_at": _now(),
         })
-        with _CONVERSION_LOCK:
-            _BROKEN_IDS.add(song_id)
-        cabinets.remove_songs_everywhere({song_id})
+        database.record_package(
+            song_id, {
+                "source_revision": catalog.source_revision(entry),
+                "package_revision": catalog.package_revision(entry),
+                "recipe_version": settings.package_recipe_version,
+            }, state, error_code=error_code,
+            error_message=str(exc),
+        )
+        attempts = database.job_attempt_count(song_id)
+        delays = (30, 120, 600, 3600)
+        delay = delays[min(max(attempts - 1, 0), len(delays) - 1)]
+        database.record_job(
+            song_id,
+            catalog.package_revision(entry),
+            state,
+            retryable=retryable,
+            next_retry_at=(
+                int(datetime.now(timezone.utc).timestamp()) + delay
+                if retryable else None
+            ),
+            error_code=error_code,
+            error_message=str(exc),
+        )
 
 
 def refresh_broken_index() -> set[str]:
@@ -337,11 +416,11 @@ def asset(song_id: str, asset_path: str) -> dict[str, Any] | None:
     if manifest is None:
         return None
 
-    allowed: dict[str, str] = {}
+    allowed: dict[str, dict[str, Any]] = {}
     for item in manifest.get("assets", []):
-        allowed[str(item["name"])] = str(item.get("sha1", ""))
+        allowed[str(item["name"])] = item
     for item in manifest.get("courses", []):
-        allowed[str(item["chart"])] = str(item.get("sha1", ""))
+        allowed[str(item["chart"])] = item
     if asset_path not in allowed:
         return None
 
@@ -351,16 +430,48 @@ def asset(song_id: str, asset_path: str) -> dict[str, Any] | None:
         path.relative_to(root)
     except ValueError:
         return None
-    if not path.is_file():
+    try:
+        stat = path.stat()
+    except OSError:
         return None
-    return {"path": path, "sha1": allowed[asset_path] or _sha1_file(path)}
+    item = allowed[asset_path]
+    expected_sha1 = str(item.get("sha1", ""))
+    try:
+        expected_size = int(item.get("size", 0))
+    except (TypeError, ValueError):
+        return None
+    if not expected_sha1 or len(expected_sha1) != 40 or expected_size <= 0:
+        return None
+    if not _asset_matches(
+        str(path), stat.st_size, stat.st_mtime_ns,
+        expected_size, expected_sha1,
+    ):
+        return None
+    return {"path": path, "sha1": expected_sha1}
+
+
+@lru_cache(maxsize=65536)
+def _asset_matches(
+    path: str,
+    actual_size: int,
+    mtime_ns: int,
+    expected_size: int,
+    expected_sha1: str,
+) -> bool:
+    del mtime_ns  # part of the cache key; content hashing uses stable bytes
+    if actual_size != expected_size:
+        return False
+    try:
+        return _sha1_file(Path(path)) == expected_sha1
+    except OSError:
+        return False
 
 
 def manifest_ready(entry: dict[str, Any]) -> bool:
     manifest = _read_manifest(str(entry["id"]))
     if (manifest is None or
-            manifest.get("schema") != 2 or
-            manifest.get("fumen_endian") != "big" or
+            manifest.get("schema") != catalog.PACKAGE_MANIFEST_SCHEMA or
+            manifest.get("fumen_endian") != catalog.PACKAGE_FUMEN_ENDIAN or
             manifest.get("source_hash") != catalog.source_hash(entry)):
         return False
     for item in manifest.get("assets", []):
@@ -382,16 +493,30 @@ def ready_status(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _convert_package(entry: dict[str, Any], package_root: Path, source_hash: str) -> dict[str, Any]:
+def _convert_package(
+    entry: dict[str, Any],
+    package_root: Path,
+    source_revision: str,
+    package_revision: str,
+) -> dict[str, Any]:
     source_type = str(entry.get("source_type") or "tja")
     if source_type == "osz":
         if not entry.get("osz_path") or not Path(str(entry["osz_path"])).is_file():
-            raise RuntimeError("osu! song has no readable OSZ file.")
+            raise ConversionError(
+                "source_missing", "osu! song has no readable OSZ file.",
+                retryable=False,
+            )
     else:
         if not entry.get("audio_path") or not Path(str(entry["audio_path"])).is_file():
-            raise RuntimeError("TJA song has no readable audio file.")
+            raise ConversionError(
+                "audio_missing", "TJA song has no readable audio file.",
+                retryable=False,
+            )
         if not entry.get("tja_path") or not Path(str(entry["tja_path"])).is_file():
-            raise RuntimeError("TJA song has no readable TJA file.")
+            raise ConversionError(
+                "source_missing", "TJA song has no readable TJA file.",
+                retryable=False,
+            )
 
     tmp = package_root.parent / "package.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -403,7 +528,11 @@ def _convert_package(entry: dict[str, Any], package_root: Path, source_hash: str
         else _convert_charts(entry, tmp)
     )
     if not courses:
-        raise RuntimeError("Song does not contain any supported Taiko course.")
+        raise ConversionError(
+            "no_supported_course",
+            "Song does not contain any supported Taiko course.",
+            retryable=False,
+        )
 
     song_id = str(entry["id"])
     song_upper = song_id.upper()
@@ -412,7 +541,10 @@ def _convert_package(entry: dict[str, Any], package_root: Path, source_hash: str
     if source_type == "osz":
         member = str(entry.get("audio_member") or "")
         if not member:
-            raise RuntimeError("OSZ has no readable audio member.")
+            raise ConversionError(
+                "audio_missing", "OSZ has no readable audio member.",
+                retryable=False,
+            )
         suffix = Path(member).suffix or ".audio"
         with tempfile.TemporaryDirectory(prefix="tjarepo-osz-audio-") as tmpdir:
             source = Path(tmpdir) / f"source{suffix}"
@@ -433,12 +565,16 @@ def _convert_package(entry: dict[str, Any], package_root: Path, source_hash: str
     tmp.rename(package_root)
 
     return {
-        "schema": 2,
+        "schema": catalog.PACKAGE_MANIFEST_SCHEMA,
         "id": song_id,
         "title": entry["title"],
         "source_path": entry["source_path"],
-        "source_hash": source_hash,
-        "fumen_endian": "big",
+        "source_revision": source_revision,
+        "recipe_version": settings.package_recipe_version,
+        "package_revision": package_revision,
+        # Compatibility alias consumed by current cabinets.
+        "source_hash": package_revision,
+        "fumen_endian": catalog.PACKAGE_FUMEN_ENDIAN,
         "courses": courses,
         "assets": assets,
         "updated_at": _now(),
@@ -609,7 +745,20 @@ def _asset_manifest(root: Path, relative: str) -> dict[str, Any]:
 
 
 def _run(args: list[str], env: dict[str, str] | None = None) -> None:
-    result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False)
+    try:
+        result = subprocess.run(
+            args,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            check=False,
+            timeout=settings.conversion_timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Command timed out after {settings.conversion_timeout_seconds}s: {args[0]}"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(result.stdout.strip() or f"Command failed: {args[0]}")
 
@@ -638,7 +787,9 @@ def _read_manifest(song_id: str) -> dict[str, Any] | None:
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    os.replace(temp, path)
 
 
 def _sha1_file(path: Path) -> str:

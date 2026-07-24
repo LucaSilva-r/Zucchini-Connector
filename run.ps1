@@ -154,7 +154,7 @@ if (-not (Test-Path "storage\ps3_at3tool.exe")) {
     Write-Host "[run] WARNING: storage\ps3_at3tool.exe missing - song conversion will fail"
 }
 
-foreach ($d in "storage\SONGS\TJA", "storage\SONGS\OSU", "storage\SONGS\CONVERTED", "storage\cabinets") {
+foreach ($d in "storage\SONGS\TJA", "storage\SONGS\OSU", "storage\SONGS\CONVERTED", "storage\cabinets", "storage\updates") {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 

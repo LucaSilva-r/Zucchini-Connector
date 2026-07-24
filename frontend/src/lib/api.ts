@@ -1,4 +1,4 @@
-import type { Cabinet, Library, ManagedLibrary, Song } from "$lib/types.js";
+import type { Cabinet, Library, ManagedLibrary, Song, ZucchiniUpdate } from "$lib/types.js";
 
 const API = "/api/ui";
 
@@ -10,8 +10,8 @@ export class ApiError extends Error {
 
 export async function apiRequest<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(API + path, { ...init, headers });
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(API + path, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
     try {
@@ -24,6 +24,17 @@ export async function apiRequest<T>(token: string, path: string, init: RequestIn
   }
   return response.json() as Promise<T>;
 }
+
+export type ManagementStatus = { configured: boolean; unlocked: boolean };
+export const getManagementStatus = () => apiRequest<ManagementStatus>("", "/auth/status");
+export const unlockManagement = (pin: string) =>
+  apiRequest<ManagementStatus>("", "/auth/pin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin }),
+  });
+export const lockManagement = () =>
+  apiRequest<ManagementStatus>("", "/auth/logout", { method: "POST" });
 
 export const getCabinets = (token: string) => apiRequest<{ cabinets: Cabinet[] }>(token, "/cabinets");
 export const getLibrary = (token: string) => apiRequest<Library>(token, "/library");
@@ -75,3 +86,20 @@ export const deleteCabinet = (token: string, cabinetId: string) =>
 
 export const resyncCabinet = (token: string, cabinetId: string) =>
   apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/resync`, { method: "POST" });
+
+export const pushZucchiniUpdate = (token: string, cabinetId: string, file: File, version: string, note: string) => {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  body.append("version", version);
+  body.append("note", note);
+  return apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/update`, { method: "POST", body });
+};
+
+export const cancelZucchiniUpdate = (token: string, cabinetId: string) =>
+  apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/update`, { method: "DELETE" });
+
+export const getZucchiniUpdates = (token: string) =>
+  apiRequest<{ updates: ZucchiniUpdate[] }>(token, "/updates");
+
+export const queueZucchiniUpdate = (token: string, cabinetId: string, updateId: string) =>
+  apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/update/${updateId}`, { method: "POST" });

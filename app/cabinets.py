@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import Lock
 
 from .config import settings
+from . import database
 
 _lock = Lock()
 
@@ -35,6 +36,7 @@ _DEFAULT = {
     "game": "",
     "game_name": "",
     "version": "",
+    "flavor": "",
     "last_seen": 0,
     "have": [],
     "reported_cfg": "",
@@ -43,6 +45,12 @@ _DEFAULT = {
     "queued_selection": None,
     "selection_seq": 0,
     "acked_seq": 0,
+    "sync_proto": 1,
+    "desired_ack": 0,
+    "active_seq": 0,
+    "verify_generation": 0,
+    "verify_ack": 0,
+    "package_states": {},
     "operation_seq": 0,
     "operation_phase": "idle",
     "operation_done": 0,
@@ -50,7 +58,20 @@ _DEFAULT = {
     "operation_failed": 0,
     "operation_song": "",
     "operation_error": "",
+    "transfer_active": False,
+    "transfer_asset": "",
+    "transfer_done": 0,
+    "transfer_total": 0,
+    "transfer_bps": 0,
     "config_pending": {},
+    "update_pending": None,
+    "update_dispatched": False,
+    "update_installed_id": "",
+    "update_installed_version": "",
+    "update_phase": "idle",
+    "update_done": 0,
+    "update_total": 0,
+    "update_error": "",
 }
 
 
@@ -102,7 +123,10 @@ def set_selection(cabinet_id: str, song_ids: list[str]) -> dict | None:
             return None
         selection = sorted(set(song_ids))
         cab["managed"] = True
-        if cab["selection_seq"] > cab["acked_seq"]:
+        accepted_seq = (
+            cab["desired_ack"] if cab["sync_proto"] >= 2 else cab["acked_seq"]
+        )
+        if cab["selection_seq"] > accepted_seq:
             # The active sequence is immutable. Operators may keep editing,
             # but only the latest draft becomes the next job after its ack.
             cab["queued_selection"] = (
@@ -123,7 +147,10 @@ def force_resync(cabinet_id: str) -> dict | None:
         cab = load(cabinet_id)
         if cab is None or not cab["managed"]:
             return cab
-        cab["selection_seq"] += 1
+        if cab["sync_proto"] >= 2:
+            cab["verify_generation"] += 1
+        else:
+            cab["selection_seq"] += 1
         _save(cab)
         return cab
 
@@ -196,6 +223,48 @@ def set_config(cabinet_id: str, kv: dict[str, str]) -> dict | None:
         return cab
 
 
+def queue_update(cabinet_id: str, artifact: dict[str, object]) -> dict | None:
+    with _lock:
+        cab = load(cabinet_id)
+        if cab is None:
+            return None
+        current = cab["update_pending"]
+        if current and current.get("id") == artifact.get("id"):
+            return cab
+        if (
+            current
+            and cab["update_phase"] in {"downloading", "verifying", "installing"}
+        ):
+            raise RuntimeError("The cabinet is already installing an update")
+        if cab["update_installed_id"] == artifact.get("id"):
+            return cab
+        cab["update_pending"] = artifact
+        cab["update_dispatched"] = False
+        cab["update_phase"] = "queued"
+        cab["update_done"] = 0
+        cab["update_total"] = int(artifact.get("size", 0))
+        cab["update_error"] = ""
+        _save(cab)
+        return cab
+
+
+def cancel_update(cabinet_id: str) -> dict | None:
+    with _lock:
+        cab = load(cabinet_id)
+        if cab is None:
+            return None
+        if cab["update_dispatched"] and cab["update_phase"] != "failed":
+            raise RuntimeError("The cabinet is already installing the update")
+        cab["update_pending"] = None
+        cab["update_dispatched"] = False
+        cab["update_phase"] = "idle"
+        cab["update_done"] = 0
+        cab["update_total"] = 0
+        cab["update_error"] = ""
+        _save(cab)
+        return cab
+
+
 def _parse_reported_cfg(raw_cfg: str) -> dict[str, str]:
     """Flatten the reported INI into section.key -> value strings.
 
@@ -222,26 +291,68 @@ def _parse_reported_cfg(raw_cfg: str) -> dict[str, str]:
     return values
 
 
+def _command_text(cab: dict, mark_update_dispatched: bool) -> str:
+    lines = []
+    if cab["managed"]:
+        lines.append("managed=1")
+        lines.append(f"seq={cab['selection_seq']}")
+        lines.extend(f"sel {sid}" for sid in cab["selection"])
+        if cab["sync_proto"] >= 2:
+            lines.append(f"verify={cab['verify_generation']}")
+    lines.extend(f"cfg {k}={v}" for k, v in cab["config_pending"].items())
+    pending = cab["update_pending"]
+    if pending:
+        lines.append(
+            f"update {pending['id']} {int(pending['size'])} {pending['version']}"
+        )
+        if mark_update_dispatched and not cab["update_dispatched"]:
+            cab["update_dispatched"] = True
+            _save(cab)
+    return "\n".join(lines) + "\n"
+
+
+def command_for(cabinet_id: str) -> str:
+    """Return the current authoritative command snapshot for WebSocket push.
+
+    It deliberately uses the same text grammar as the legacy poll response,
+    allowing old HTTP polling to remain a reconciliation fallback.
+    """
+    with _lock:
+        cab = load(cabinet_id)
+        return _command_text(cab, True) if cab is not None else "\n"
+
+
 def handle_poll(body: str) -> str:
     """Heartbeat + ack + fetch-pending, one round trip.
 
-    Request lines: id=, serial=, name=, game=, version=, seq=,
+    Request lines: id=, serial=, name=, game=, version=, flavor=, seq=,
     op_seq=, op_phase=, op_done=, op_total=, op_failed=, op_song=,
-    op_error=,
+    op_error=, update_ack=, update_work_id=, update_phase=,
+    update_done=, update_total=, update_error=,
     applied=<section.key>=<value> (repeatable), have <song_id> (repeatable),
     then a blank line and the raw taiko_config.cfg contents.
 
     Response lines: managed=1, seq=N, cfg <section.key>=<value>,
-    sel <song_id>.
+    sel <song_id>, update <sha1> <size> <version>.
     """
     head, _, raw_cfg = body.partition("\n\n")
     fields: dict[str, str] = {}
     applied: list[str] = []
     have: list[str] = []
+    package_states: list[tuple[str, str, str, str]] = []
     for line in head.splitlines():
         line = line.strip()
         if line.startswith("have "):
             have.append(line[5:].strip())
+        elif line.startswith("pkg "):
+            parts = line.split(" ", 4)
+            if len(parts) >= 4:
+                package_states.append((
+                    parts[1][:64],
+                    parts[2][:64],
+                    parts[3][:24],
+                    parts[4][:64] if len(parts) > 4 else "",
+                ))
         elif line.startswith("applied="):
             applied.append(line[8:].strip())
         elif "=" in line:
@@ -259,12 +370,25 @@ def handle_poll(body: str) -> str:
         cab["game"] = fields.get("game", cab["game"])
         cab["game_name"] = GAME_NAMES.get(cab["game"], cab["game"])
         cab["version"] = fields.get("version", cab["version"])
+        cab["flavor"] = fields.get("flavor", cab["flavor"])
+        try:
+            cab["sync_proto"] = max(
+                cab["sync_proto"], int(fields.get("sync_proto", "1"))
+            )
+        except ValueError:
+            pass
         cab["last_seen"] = int(time.time())
         # Long song operations own and mutate the in-memory cache index. During
         # that window the cabinet sends have_complete=0 and omits the list;
         # retain the last complete inventory instead of flashing back to zero.
         if fields.get("have_complete", "1") != "0":
             cab["have"] = have
+            have_set = set(have)
+            cab["package_states"] = {
+                song_id: value
+                for song_id, value in cab["package_states"].items()
+                if song_id in have_set
+            }
         if raw_cfg.strip():
             cab["reported_cfg"] = raw_cfg
         for item in applied:
@@ -283,6 +407,26 @@ def handle_poll(body: str) -> str:
             cab["acked_seq"] = max(cab["acked_seq"], int(fields.get("seq", "0")))
         except ValueError:
             pass
+        for field, key in (
+            ("desired_ack", "desired_ack"),
+            ("active_seq", "active_seq"),
+            ("verify_ack", "verify_ack"),
+        ):
+            try:
+                cab[key] = max(cab[key], int(fields.get(field, "0")))
+            except ValueError:
+                pass
+        for song_id, revision, package_state, error_code in package_states:
+            if not song_id:
+                continue
+            cab["package_states"][song_id] = {
+                "revision": revision,
+                "state": package_state,
+                "error_code": error_code,
+            }
+            database.record_cabinet_package_state(
+                cabinet_id, song_id, revision, package_state, error_code
+            )
 
         if "op_phase" in fields:
             cab["operation_phase"] = fields["op_phase"][:32]
@@ -298,10 +442,59 @@ def handle_poll(body: str) -> str:
                     cab[key] = max(0, int(fields.get(field, "0")))
                 except ValueError:
                     cab[key] = 0
+        if "xfer_active" in fields:
+            cab["transfer_active"] = fields["xfer_active"] == "1"
+            cab["transfer_asset"] = fields.get("xfer_asset", "")[:128]
+            for field, key in (
+                ("xfer_done", "transfer_done"),
+                ("xfer_total", "transfer_total"),
+                ("xfer_bps", "transfer_bps"),
+            ):
+                try:
+                    cab[key] = max(0, int(fields.get(field, "0")))
+                except ValueError:
+                    cab[key] = 0
+
+        update_ack = fields.get("update_ack", "")
+        update_ack_valid = len(update_ack) == 40 and all(
+            char in "0123456789abcdef" for char in update_ack
+        )
+        acknowledged_update = False
+        pending = cab["update_pending"]
+        if update_ack_valid:
+            cab["update_installed_id"] = update_ack
+            if pending and pending.get("id") == update_ack:
+                cab["update_installed_version"] = str(pending.get("version", ""))
+                cab["update_pending"] = None
+                cab["update_dispatched"] = False
+                cab["update_phase"] = "complete"
+                cab["update_done"] = int(pending.get("size", 0))
+                cab["update_total"] = int(pending.get("size", 0))
+                cab["update_error"] = ""
+                pending = None
+                acknowledged_update = True
+
+        work_id = fields.get("update_work_id", "")
+        if not acknowledged_update and "update_phase" in fields and (
+            not pending or not work_id or pending.get("id") == work_id
+        ):
+            cab["update_phase"] = fields["update_phase"][:32]
+            cab["update_error"] = fields.get("update_error", "")[:160]
+            for field, key in (
+                ("update_done", "update_done"),
+                ("update_total", "update_total"),
+            ):
+                try:
+                    cab[key] = max(0, int(fields.get(field, "0")))
+                except ValueError:
+                    cab[key] = 0
 
         # Promote exactly one queued edit only after the cabinet atomically
         # applied and acknowledged the immutable active sequence.
-        if cab["acked_seq"] >= cab["selection_seq"] and cab["queued_selection"] is not None:
+        accepted_seq = (
+            cab["desired_ack"] if cab["sync_proto"] >= 2 else cab["acked_seq"]
+        )
+        if accepted_seq >= cab["selection_seq"] and cab["queued_selection"] is not None:
             queued = cab["queued_selection"]
             cab["queued_selection"] = None
             if queued != cab["selection"]:
@@ -309,10 +502,4 @@ def handle_poll(body: str) -> str:
                 cab["selection_seq"] += 1
         _save(cab)
 
-        lines = []
-        if cab["managed"]:
-            lines.append("managed=1")
-            lines.append(f"seq={cab['selection_seq']}")
-            lines.extend(f"sel {sid}" for sid in cab["selection"])
-        lines.extend(f"cfg {k}={v}" for k, v in cab["config_pending"].items())
-        return "\n".join(lines) + "\n"
+        return _command_text(cab, True)
