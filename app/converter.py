@@ -34,6 +34,7 @@ _CONVERSION_LOCK = RLock()
 _BROKEN_IDS: set[str] = set()
 _RETRY_STOP = Event()
 _RETRY_THREAD: Thread | None = None
+_MAX_CONVERSION_ATTEMPTS = 4
 
 
 class ConversionError(RuntimeError):
@@ -41,6 +42,14 @@ class ConversionError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+def _failure_is_retryable(exc: Exception, attempts: int) -> bool:
+    if isinstance(exc, ConversionError):
+        return exc.retryable and attempts < _MAX_CONVERSION_ATTEMPTS
+    if isinstance(exc, (AssertionError, IndexError, KeyError, TypeError, ValueError)):
+        return False
+    return attempts < _MAX_CONVERSION_ATTEMPTS
 
 
 def enqueue(song_id: str) -> dict[str, Any]:
@@ -250,7 +259,11 @@ def convert(song_id: str) -> None:
         with _CONVERSION_LOCK:
             _BROKEN_IDS.discard(song_id)
     except Exception as exc:
-        retryable = not isinstance(exc, ConversionError) or exc.retryable
+        attempts = database.job_attempt_count(song_id)
+        # Parser/chart-shape errors are deterministic for a given source
+        # revision. Other failures may be transient, but a broken executable
+        # or input must not remain "retrying" forever.
+        retryable = _failure_is_retryable(exc, attempts)
         error_code = (
             exc.code if isinstance(exc, ConversionError) else "conversion_failed"
         )
@@ -274,7 +287,6 @@ def convert(song_id: str) -> None:
             }, state, error_code=error_code,
             error_message=str(exc),
         )
-        attempts = database.job_attempt_count(song_id)
         delays = (30, 120, 600, 3600)
         delay = delays[min(max(attempts - 1, 0), len(delays) - 1)]
         database.record_job(

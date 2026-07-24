@@ -38,6 +38,20 @@ class PackageIntegrityTests(unittest.TestCase):
 
 
 class DurableJobTests(unittest.TestCase):
+    def test_deterministic_conversion_errors_are_terminal(self) -> None:
+        self.assertFalse(converter._failure_is_retryable(
+            ValueError("Branches do not have the same number of measures"), 1
+        ))
+        self.assertFalse(converter._failure_is_retryable(
+            IndexError("pop from empty list"), 1
+        ))
+
+    def test_transient_conversion_errors_have_a_retry_cap(self) -> None:
+        self.assertTrue(converter._failure_is_retryable(RuntimeError("tool failed"), 1))
+        self.assertFalse(converter._failure_is_retryable(
+            RuntimeError("tool failed"), converter._MAX_CONVERSION_ATTEMPTS
+        ))
+
     def test_retry_deadline_survives_a_new_connection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "connector.db"

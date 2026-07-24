@@ -89,7 +89,7 @@ export type Library = {
 
 export type ManagedSong = Song & {
   source: "tja" | "osu";
-  conversion_status: "ready" | "failed" | "queued" | "processing" | "unconverted" | "not_found";
+  conversion_status: "ready" | "failed" | "queued" | "processing" | "retrying" | "unconverted" | "not_found";
   conversion_error: string;
   conversion_updated_at: string;
 };

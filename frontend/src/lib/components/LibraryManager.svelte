@@ -63,7 +63,7 @@
   const visible = $derived(filtered.slice((page - 1) * pageSize, page * pageSize));
   const failedCount = $derived(data?.songs.filter((song) => song.conversion_status === "failed").length ?? 0);
   const readyCount = $derived(data?.songs.filter((song) => song.conversion_status === "ready").length ?? 0);
-  const activeCount = $derived(data?.songs.filter((song) => ["queued", "processing"].includes(song.conversion_status)).length ?? 0);
+  const activeCount = $derived(data?.songs.filter((song) => ["queued", "processing", "retrying"].includes(song.conversion_status)).length ?? 0);
   const checkedSet = $derived(new Set(checked));
   const allFilteredChecked = $derived(filtered.length > 0 && filtered.every((song) => checkedSet.has(song.id)));
 
@@ -222,7 +222,7 @@
       <div class="flex flex-col gap-2 sm:flex-row">
         <div class="relative min-w-0 flex-1 sm:max-w-72"><SearchIcon class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input bind:value={query} class="h-8 pl-9" placeholder="Search songs…" /></div>
         <select bind:value={categoryFilter} aria-label="Category" class="h-8 max-w-56 rounded-md border bg-background px-2 text-sm"><option value="all">All categories</option>{#each songCategories as category (category.id)}<option value={category.id}>{category.title}</option>{/each}</select>
-        <select bind:value={health} aria-label="Conversion health" class="h-8 rounded-md border bg-background px-2 text-sm"><option value="all">All health</option><option value="failed">Broken</option><option value="ready">Ready</option><option value="unconverted">Not converted</option><option value="processing">Processing</option><option value="queued">Queued</option></select>
+        <select bind:value={health} aria-label="Conversion health" class="h-8 rounded-md border bg-background px-2 text-sm"><option value="all">All health</option><option value="failed">Broken</option><option value="ready">Ready</option><option value="unconverted">Not converted</option><option value="processing">Processing</option><option value="queued">Queued</option><option value="retrying">Retrying</option></select>
         <Button variant="outline" size="icon-sm" aria-label="Refresh library" disabled={loading} onclick={load}><RefreshCwIcon class={loading ? "animate-spin" : ""} /></Button>
       </div>
     </Card.Header>
