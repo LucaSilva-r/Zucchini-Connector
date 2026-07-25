@@ -29,6 +29,7 @@
 
   let deleting = $state(false);
   let forgetOpen = $state(false);
+  let tab = $state("songs");
   let deleteError = $state("");
   let resyncing = $state(false);
   const liveCabinetId = $derived(cabinet.cabinet_id);
@@ -218,17 +219,20 @@
   </Card.Header>
 
   <Card.Content class="p-3 sm:p-4">
-    <Tabs.Root value="songs">
+    <Tabs.Root bind:value={tab}>
       <Tabs.List class="mb-3 max-w-full">
         <Tabs.Trigger value="songs">Library</Tabs.Trigger>
         <Tabs.Trigger value="control">Control</Tabs.Trigger>
         <Tabs.Trigger value="config">Config</Tabs.Trigger>
         <Tabs.Trigger value="update">Update</Tabs.Trigger>
       </Tabs.List>
-      <Tabs.Content value="songs"><SongSelection {token} {cabinet} {library} onSaved={onUpdated} /></Tabs.Content>
-      <Tabs.Content value="control"><ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate></Tabs.Content>
-      <Tabs.Content value="config"><ManagementGate><ConfigPanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate></Tabs.Content>
-      <Tabs.Content value="update"><ManagementGate><UpdatePanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate></Tabs.Content>
+      <!-- bits-ui renders inactive tab panels too, so each one is mounted
+           only while selected: the controller must not hold a socket (or the
+           keyboard) from behind the song list. -->
+      <Tabs.Content value="songs">{#if tab === "songs"}<SongSelection {token} {cabinet} {library} onSaved={onUpdated} />{/if}</Tabs.Content>
+      <Tabs.Content value="control">{#if tab === "control"}<ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
+      <Tabs.Content value="config">{#if tab === "config"}<ManagementGate><ConfigPanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
+      <Tabs.Content value="update">{#if tab === "update"}<ManagementGate><UpdatePanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
     </Tabs.Root>
   </Card.Content>
 </Card.Root>
