@@ -37,15 +37,25 @@ class Settings:
             env("PS3_AT3TOOL_PATH", str(base / "storage" / "ps3_at3tool.exe"))
         )
         self.audio_bitrate_kbps = int(env("AT3_BITRATE_KBPS", "256"))
+        # Charts whose first note lands sooner than this are given silence at
+        # the start of the audio (and the chart is moved back to match), so the
+        # player gets time to react. Set to 0 to disable.
+        # 1500 ms comes from the game's own fumen files: across 4252 official
+        # solo charts the earliest first note is 1122 ms, p5 is 1491 ms, and
+        # none start under 1000 ms.
+        self.min_lead_in_ms = max(0, int(env("MIN_LEAD_IN_MS", "1500")))
         # Bump only when generated chart/audio/package bytes may change.
-        self.package_recipe_version = env("PACKAGE_RECIPE_VERSION", "1")
+        self.package_recipe_version = env("PACKAGE_RECIPE_VERSION", "2")
         self.conversion_timeout_seconds = max(
             30, int(env("CONVERSION_TIMEOUT_SECONDS", "900"))
         )
         self.library_full_rescan_seconds = max(
             30, int(env("LIBRARY_FULL_RESCAN_SECONDS", "300"))
         )
-        default_workers = min(4, os.cpu_count() or 1)
+        # Conversion is mostly ffmpeg/at3tool subprocesses, so the workers sit
+        # in wait() rather than holding the GIL: one per core is what makes a
+        # full-library rebuild finish in a reasonable time.
+        default_workers = os.cpu_count() or 1
         self.conversion_workers = max(
             1,
             min(32, int(env("CONVERSION_WORKERS", str(default_workers)))),

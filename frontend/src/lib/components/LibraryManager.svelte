@@ -10,7 +10,8 @@
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
   import UploadIcon from "@lucide/svelte/icons/upload";
   import { onMount } from "svelte";
-  import { deleteLibrarySong, deleteLibrarySongs, getManagedLibrary, retryLibrarySong, uploadOsz, uploadTja } from "$lib/api.js";
+  import ZapIcon from "@lucide/svelte/icons/zap";
+  import { convertLibrary, deleteLibrarySong, deleteLibrarySongs, getManagedLibrary, reconvertLibrarySongs, retryLibrarySong, uploadOsz, uploadTja } from "$lib/api.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -19,6 +20,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { Label } from "$lib/components/ui/label/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
+  import { ensureManagement } from "$lib/management.svelte.js";
   import type { ManagedLibrary, ManagedSong } from "$lib/types.js";
 
   let { token, onChanged }: { token: string; onChanged: () => void | Promise<void> } = $props();
@@ -31,6 +33,7 @@
   let notice = $state("");
   let query = $state("");
   let health = $state("all");
+  let sourceFilter = $state("all");
   let categoryFilter = $state("all");
   let page = $state(1);
   let oszFile = $state<File | null>(null);
@@ -40,6 +43,8 @@
   let checked = $state<string[]>([]);
   let deleteTargets = $state<ManagedSong[]>([]);
   let deleteOpen = $state(false);
+  let convertOpen = $state(false);
+  let convertBroken = $state(false);
 
   const categoryTitle = $derived.by(() => {
     const titles = new Map((data?.categories ?? []).map((category) => [category.id, category.title]));
@@ -54,6 +59,7 @@
   const normalizedQuery = $derived(query.trim().toLocaleLowerCase());
   const filtered = $derived.by(() => (data?.songs ?? []).filter((song) => {
     if (health !== "all" && song.conversion_status !== health) return false;
+    if (sourceFilter !== "all" && song.source !== sourceFilter) return false;
     if (categoryFilter !== "all" && song.category !== categoryFilter) return false;
     if (!normalizedQuery) return true;
     return [song.title, song.display_title, song.subtitle, song.id, song.category]
@@ -70,8 +76,16 @@
   $effect(() => {
     query;
     health;
+    sourceFilter;
     categoryFilter;
     page = 1;
+  });
+
+  // Follow a running batch without making the operator hit refresh.
+  $effect(() => {
+    if (!activeCount) return;
+    const timer = setInterval(() => { if (!busy && !loading) load(); }, 4000);
+    return () => clearInterval(timer);
   });
 
   function toggleAllFiltered(value: boolean) {
@@ -109,6 +123,7 @@
   }
 
   async function submitOsz() {
+    if (!(await ensureManagement())) return;
     if (!oszFile) return;
     busy = true;
     error = "";
@@ -122,6 +137,7 @@
   }
 
   async function submitTja() {
+    if (!(await ensureManagement())) return;
     if (!tjaFiles.length) return;
     busy = true;
     error = "";
@@ -135,17 +151,47 @@
   }
 
   async function retry(song: ManagedSong) {
+    if (!(await ensureManagement())) return;
     busy = true;
     error = "";
     try {
       await retryLibrarySong(token, song.id);
-      await afterMutation(`Retry queued for ${song.display_title || song.title}.`);
+      await afterMutation(`Conversion queued for ${song.display_title || song.title}.`);
     } catch (reason) {
-      error = reason instanceof Error ? reason.message : "Could not retry the conversion.";
+      error = reason instanceof Error ? reason.message : "Could not queue the conversion.";
     } finally { busy = false; }
   }
 
-  function requestDelete(songs: ManagedSong[]) {
+  async function reconvertSelected() {
+    if (!(await ensureManagement())) return;
+    if (!checked.length) return;
+    busy = true;
+    error = "";
+    try {
+      const result = await reconvertLibrarySongs(token, checked);
+      await afterMutation(`Reconversion queued for ${result.scheduled} songs.`);
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "Could not queue the reconversions.";
+    } finally { busy = false; }
+  }
+
+  async function convertEverything() {
+    if (!(await ensureManagement())) return;
+    busy = true;
+    error = "";
+    try {
+      const result = await convertLibrary(token, convertBroken);
+      convertOpen = false;
+      await afterMutation(`Queued ${result.scheduled} songs; already-converted ones are skipped.`);
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "Could not start the batch conversion.";
+    } finally { busy = false; }
+  }
+
+  // Ask for the PIN before the confirmation, so a locked operator never gets
+  // as far as a dialog whose action they cannot perform.
+  async function requestDelete(songs: ManagedSong[]) {
+    if (!(await ensureManagement())) return;
     deleteTargets = songs;
     deleteOpen = true;
   }
@@ -222,7 +268,9 @@
       <div class="flex flex-col gap-2 sm:flex-row">
         <div class="relative min-w-0 flex-1 sm:max-w-72"><SearchIcon class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input bind:value={query} class="h-8 pl-9" placeholder="Search songs…" /></div>
         <select bind:value={categoryFilter} aria-label="Category" class="h-8 max-w-56 rounded-md border bg-background px-2 text-sm"><option value="all">All categories</option>{#each songCategories as category (category.id)}<option value={category.id}>{category.title}</option>{/each}</select>
+        <select bind:value={sourceFilter} aria-label="Chart source" class="h-8 rounded-md border bg-background px-2 text-sm"><option value="all">All sources</option><option value="tja">TJA</option><option value="osu">osu!</option></select>
         <select bind:value={health} aria-label="Conversion health" class="h-8 rounded-md border bg-background px-2 text-sm"><option value="all">All health</option><option value="failed">Broken</option><option value="ready">Ready</option><option value="unconverted">Not converted</option><option value="processing">Processing</option><option value="queued">Queued</option><option value="retrying">Retrying</option></select>
+        <Button variant="outline" size="sm" class="h-8" disabled={busy} onclick={async () => { if (await ensureManagement()) convertOpen = true; }}><ZapIcon /> Convert all</Button>
         <Button variant="outline" size="icon-sm" aria-label="Refresh library" disabled={loading} onclick={load}><RefreshCwIcon class={loading ? "animate-spin" : ""} /></Button>
       </div>
     </Card.Header>
@@ -240,6 +288,7 @@
           {#if checked.length}
             <div class="flex gap-2">
               <Button variant="ghost" size="sm" class="h-7" disabled={busy} onclick={() => checked = []}>Clear</Button>
+              <Button variant="outline" size="sm" class="h-7" disabled={busy} onclick={reconvertSelected}><RefreshCwIcon /> Reconvert {checked.length}</Button>
               <Button variant="destructive" size="sm" class="h-7" disabled={busy} onclick={() => requestDelete((data?.songs ?? []).filter((song) => checkedSet.has(song.id)))}><Trash2Icon /> Delete {checked.length}</Button>
             </div>
           {/if}
@@ -260,9 +309,9 @@
               </div>
               <div class="hidden w-36 truncate text-xs text-muted-foreground sm:block">{categoryTitle(song.category)}</div>
               <Badge variant={song.conversion_status === "failed" ? "destructive" : song.conversion_status === "ready" ? "default" : "secondary"} class="h-5 px-1.5 text-[10px]">{statusLabel(song.conversion_status)}</Badge>
-              <Badge variant="outline" class="hidden h-5 px-1.5 text-[10px] sm:inline-flex">{song.source.toUpperCase()}</Badge>
+              <Badge variant="outline" class={`hidden h-5 px-1.5 text-[10px] sm:inline-flex ${song.source === "osu" ? "border-pink-500/40 bg-pink-500/10 text-pink-600 dark:text-pink-400" : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"}`}>{song.source.toUpperCase()}</Badge>
               <div class="flex w-20 justify-end gap-1">
-                {#if song.conversion_status === "failed"}<Button variant="ghost" size="icon-sm" class="size-7" aria-label={`Retry ${song.title}`} disabled={busy} onclick={() => retry(song)}><RefreshCwIcon /></Button>{/if}
+                <Button variant="ghost" size="icon-sm" class="size-7" aria-label={`${song.conversion_status === "failed" ? "Retry" : "Reconvert"} ${song.title}`} title={song.conversion_status === "failed" ? "Retry conversion" : "Convert again"} disabled={busy} onclick={() => retry(song)}><RefreshCwIcon /></Button>
                 <Button variant="ghost" size="icon-sm" class="size-7 text-destructive hover:text-destructive" aria-label={`Delete ${song.title}`} disabled={busy} onclick={() => requestDelete([song])}><Trash2Icon /></Button>
               </div>
             </div>
@@ -273,6 +322,23 @@
     </Card.Content>
   </Card.Root>
 </div>
+
+<AlertDialog.Root bind:open={convertOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Convert the whole library?</AlertDialog.Title>
+      <AlertDialog.Description>
+        Every song that isn't already converted is queued at once and processed on all available CPU cores.
+        Songs whose package is current are skipped, so this is safe to run again to resume.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <label class="flex cursor-pointer items-center gap-2 text-sm">
+      <Checkbox checked={convertBroken} onCheckedChange={(value) => convertBroken = value === true} />
+      <span>Also retry the {failedCount} broken {failedCount === 1 ? "song" : "songs"}</span>
+    </label>
+    <AlertDialog.Footer><AlertDialog.Cancel disabled={busy}>Cancel</AlertDialog.Cancel><AlertDialog.Action disabled={busy} onclick={convertEverything}>{busy ? "Queueing…" : "Convert all"}</AlertDialog.Action></AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <AlertDialog.Root bind:open={deleteOpen}>
   <AlertDialog.Content>

@@ -70,16 +70,22 @@ def split_tja_lines_into_courses(lines: List[str]) -> TJASong:
     lines = [line.split("//")[0].strip() for line in lines
              if line.split("//")[0].strip()]
 
-    # Initialize song with BPM and OFFSET global metadata
-    tja_metadata = {}
-    for required_metadata in ["BPM", "OFFSET"]:
+    # Initialize song with BPM and OFFSET global metadata.
+    # BPM is required; OFFSET is optional and defaults to 0 (i.e. the chart
+    # starts at the very beginning of the audio), which is how other TJA
+    # players treat a missing 'OFFSET:' field.
+    tja_metadata = {'OFFSET': 0.0}
+    for metadata_name, required in [("BPM", True), ("OFFSET", False)]:
         for line in lines:
-            if line.startswith(required_metadata):
-                tja_metadata[required_metadata] = float(line.split(":")[1])
+            if line.startswith(metadata_name):
+                tja_metadata[metadata_name] = float(line.split(":")[1])
                 break
         else:
-            raise ValueError(f"TJA does not contain required "
-                             f"'{required_metadata}' metadata.")
+            if required:
+                raise ValueError(f"TJA does not contain required "
+                                 f"'{metadata_name}' metadata.")
+            warnings.warn(f"TJA does not contain '{metadata_name}' metadata. "
+                          f"Using value=0.")
     parsed_tja = TJASong(
         bpm=tja_metadata['BPM'],
         offset=tja_metadata['OFFSET'],
@@ -531,6 +537,16 @@ def fix_balloon_field(balloon_field: List[int],
     duplicated_balloons = []
     balloon_field_fixed = []
 
+    def pop_hits(field: List[int]) -> int:
+        """Pop the next 'BALLOON:' value, or default to 1 if the TJA author
+        didn't list enough values. (convert_tja_to_fumen() does the same.)"""
+        try:
+            return field.pop(0)
+        except IndexError:
+            warnings.warn("Not enough values for 'BALLOON:'. Using value=1 "
+                          "to avoid crashing. Check TJA and re-run.")
+            return 1
+
     # Handle the normal branch first
     # If balloons are duplicated, then it's probably going to be from 'normal'
     # FIXME: If the balloons are duplicated from the master/professional branch
@@ -539,7 +555,7 @@ def fix_balloon_field(balloon_field: List[int],
     #        But, this is such a rare case that I'm alright handling it
     #        incorrectly. If a user files a bug report, then I'll fix it then.
     for balloon_note in balloon_data['normal']:
-        balloon_hits = balloon_field.pop(0)
+        balloon_hits = pop_hits(balloon_field)
         if balloon_note == 'DUPE':
             duplicated_balloons.append(balloon_hits)
         balloon_field_fixed.append(balloon_hits)
@@ -548,10 +564,10 @@ def fix_balloon_field(balloon_field: List[int],
     for branch_name in ['professional', 'master']:
         dupes_to_copy = duplicated_balloons.copy()
         for balloon_note in balloon_data[branch_name]:
-            if balloon_note == 'DUPE':
+            if balloon_note == 'DUPE' and dupes_to_copy:
                 balloon_field_fixed.append(dupes_to_copy.pop(0))
             else:
-                balloon_field_fixed.append(balloon_field.pop(0))
+                balloon_field_fixed.append(pop_hits(balloon_field))
 
     return balloon_field_fixed
 

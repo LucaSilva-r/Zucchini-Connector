@@ -64,6 +64,30 @@ export const deleteLibrarySongs = (token: string, songIds: string[]) =>
     body: JSON.stringify({ song_ids: songIds }),
   });
 
+export type ConvertAllResult = {
+  status: string;
+  accepted: number;
+  scheduled: number;
+  already_scheduled: number;
+  not_found: number;
+};
+
+export const convertLibrary = (token: string, includeFailed: boolean) =>
+  apiRequest<ConvertAllResult>(token, `/library/convert-all?include_failed=${includeFailed}`, {
+    method: "POST",
+  });
+
+export const reconvertLibrarySongs = (token: string, songIds: string[]) =>
+  apiRequest<{ status: string; requested: number; scheduled: number; not_found: number }>(
+    token,
+    "/library/songs/reconvert-batch",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ song_ids: songIds }),
+    },
+  );
+
 export const retryLibrarySong = (token: string, songId: string) =>
   apiRequest<{ status: string }>(token, `/library/songs/${songId}/retry`, { method: "POST" });
 

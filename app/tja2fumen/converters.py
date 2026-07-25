@@ -4,12 +4,96 @@ Functions for converting TJA song data to Fumen song data.
 
 import re
 import warnings
+from collections import Counter
+from dataclasses import replace
+from fractions import Fraction
+from math import lcm
 from typing import List, Dict, Tuple, Union
 
-from tja2fumen.classes import (TJACourse, TJAMeasure, TJAMeasureProcessed,
-                               FumenCourse, FumenHeader, FumenMeasure,
-                               FumenNote)
+from tja2fumen.classes import (TJAData, TJACourse, TJAMeasure,
+                               TJAMeasureProcessed, FumenCourse, FumenHeader,
+                               FumenMeasure, FumenNote)
 from tja2fumen.constants import BRANCH_NAMES, SENOTECHANGE_TYPES
+
+# Commands that force a measure to be split into sub-measures
+SPLIT_COMMANDS = ['bpm', 'scroll', 'gogo', 'senote']
+
+
+def align_branch_splits(tja_branches: Dict[str, List[TJAMeasure]]) \
+                                    -> Dict[str, List[TJAMeasure]]:
+    """
+    Make sure that every branch splits its measures at the same positions.
+
+    Fumen files require all branches to have the same number of (sub)measures.
+    But TJA authors often write mid-measure BPM/SCROLL/GOGO commands in only
+    one branch, which would make that branch produce extra sub-measures.
+
+    To fix this, for each measure we take the union of the mid-measure split
+    positions across all branches, and insert a no-op 'split' event into the
+    branches that are missing them. Positions are compared as fractions of the
+    measure, since each branch can have a different number of subdivisions.
+    If a branch's measure is too coarse to express a split position (e.g. an
+    empty measure), it is subdivided further by padding it with rests.
+    """
+    if not all(tja_branches.values()):
+        return tja_branches  # no branches, nothing to align
+
+    n_measures = min(len(b) for b in tja_branches.values())
+    aligned: Dict[str, List[TJAMeasure]] = {
+        name: list(measures) for name, measures in tja_branches.items()
+    }
+    for idx_m in range(n_measures):
+        fractions_per_branch = {}
+        for branch_name, measures in tja_branches.items():
+            measure = measures[idx_m]
+            subdivisions = len(measure.notes)
+            # Counted, not a set: each command creates its own sub-measure,
+            # so 2 commands at the same position need 2 splits elsewhere.
+            fractions_per_branch[branch_name] = Counter(
+                Fraction(data.pos, subdivisions)
+                for data in measure.combined
+                if data.name in SPLIT_COMMANDS and data.pos and subdivisions
+            )
+        all_fractions: Counter = Counter()
+        for counts in fractions_per_branch.values():
+            all_fractions |= counts  # multiset union (max of each count)
+        for branch_name, fractions in fractions_per_branch.items():
+            missing = list((all_fractions - fractions).elements())
+            if not missing:
+                continue
+            measure = tja_branches[branch_name][idx_m]
+            notes = measure.notes
+            combined = measure.combined
+
+            # Subdivide the measure further if it's too coarse for the split
+            # positions (all fractions must land on an integer note index).
+            subdivisions = len(notes)
+            new_subdivisions = subdivisions if subdivisions else 1
+            for fraction in missing:
+                new_subdivisions = lcm(new_subdivisions, fraction.denominator)
+            factor = new_subdivisions // (subdivisions if subdivisions else 1)
+            if factor > 1:
+                if subdivisions:
+                    notes = [n for note in notes
+                             for n in [note] + ['0'] * (factor - 1)]
+                else:
+                    notes = ['0'] * new_subdivisions
+                combined = [replace(data, pos=data.pos * factor)
+                            for data in combined]
+
+            combined = list(combined)
+            for fraction in missing:
+                combined.append(TJAData(
+                    name='split', value='',
+                    pos=int(fraction * new_subdivisions)
+                ))
+            # Stable sort: inserted splits come after the events at that pos
+            combined.sort(key=lambda data: data.pos)
+            # Measures can be shared between branches, so never mutate in place
+            aligned[branch_name][idx_m] = replace(measure, notes=notes,
+                                                  combined=combined)
+
+    return aligned
 
 
 def process_commands(tja_branches: Dict[str, List[TJAMeasure]], bpm: float) \
@@ -30,6 +114,7 @@ def process_commands(tja_branches: Dict[str, List[TJAMeasure]], bpm: float) \
     After this function is finished, all the #COMMANDS will be gone, and each
     measure will have attributes (e.g. measure.bpm, measure.scroll) instead.
     """
+    tja_branches = align_branch_splits(tja_branches)
     tja_branches_processed: Dict[str, List[TJAMeasureProcessed]] = {
         branch_name: [] for branch_name in tja_branches.keys()
     }
@@ -96,10 +181,13 @@ def process_commands(tja_branches: Dict[str, List[TJAMeasure]], bpm: float) \
                 # to BPM/SCROLL/GOGO, then the measure will actually be split
                 # into two small submeasures. So, we need to start a new
                 # measure in those cases.)
-                elif data.name in ['bpm', 'scroll', 'gogo', 'senote']:
+                elif data.name in SPLIT_COMMANDS + ['split']:
                     # Parse the values
                     new_val: Union[bool, float, str]
-                    if data.name == 'bpm':
+                    if data.name == 'split':
+                        # No-op split inserted by align_branch_splits()
+                        new_val = ''
+                    elif data.name == 'bpm':
                         new_val = current_bpm = float(data.value)
                     elif data.name == 'scroll':
                         new_val = current_scroll = float(data.value)
@@ -112,6 +200,8 @@ def process_commands(tja_branches: Dict[str, List[TJAMeasure]], bpm: float) \
                     # - Case 1: Command happens at the start of a measure;
                     #           just change the value directly
                     if data.pos == 0:
+                        if data.name == 'split':
+                            continue
                         setattr(measure_tja_processed, data.name,
                                 new_val)  # noqa: new_val will always be set
                     # - Case 2: Command happens in the middle of a measure;

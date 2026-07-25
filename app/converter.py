@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import struct
@@ -14,6 +15,7 @@ from pathlib import Path
 from threading import Event, RLock, Thread
 from typing import Any
 
+from tja2fumen.classes import FumenCourse
 from tja2fumen.constants import COURSE_IDS
 from tja2fumen.converters import convert_tja_to_fumen, fix_dk_note_types_course
 from tja2fumen.parsers import parse_tja
@@ -103,6 +105,37 @@ def enqueue_many(song_ids: list[str]) -> dict[str, int | str]:
         "scheduled": scheduled,
         "already_scheduled": already_scheduled,
         "not_found": not_found,
+    }
+
+
+def convert_all(*, include_failed: bool = False) -> dict[str, int | str]:
+    """Queue the whole library, for when every package needs rebuilding.
+
+    Songs whose package is already current are skipped by the worker, so this
+    is also the cheap way to resume an interrupted full rebuild.
+    """
+    song_ids = [str(song["id"]) for song in catalog.library()["songs"]]
+    if include_failed:
+        for song_id in song_ids:
+            if status_for(song_id).get("status") == "failed":
+                prepare(song_id, retry=True)
+    return enqueue_many(song_ids)
+
+
+def reconvert_many(song_ids: list[str]) -> dict[str, int | str]:
+    """Force a rebuild of specific songs, even when their package is current."""
+    scheduled = 0
+    missing = 0
+    for song_id in song_ids:
+        if retry(song_id).get("status") == "not_found":
+            missing += 1
+        else:
+            scheduled += 1
+    return {
+        "status": "accepted",
+        "requested": len(song_ids),
+        "scheduled": scheduled,
+        "not_found": missing,
     }
 
 
@@ -534,7 +567,7 @@ def _convert_package(
     shutil.rmtree(tmp, ignore_errors=True)
     (tmp / "solo").mkdir(parents=True, exist_ok=True)
 
-    courses = (
+    courses, lead_in_ms = (
         _convert_osz_charts(entry, tmp)
         if source_type == "osz"
         else _convert_charts(entry, tmp)
@@ -563,9 +596,11 @@ def _convert_package(
             source.write_bytes(
                 osu.read_member(Path(str(entry["osz_path"])), member, osu.MAX_AUDIO_BYTES)
             )
-            _convert_audio(source, tmp / nub_name, tmp / nsh_name)
+            _convert_audio(source, tmp / nub_name, tmp / nsh_name, lead_in_ms)
     else:
-        _convert_audio(Path(str(entry["audio_path"])), tmp / nub_name, tmp / nsh_name)
+        _convert_audio(
+            Path(str(entry["audio_path"])), tmp / nub_name, tmp / nsh_name, lead_in_ms
+        )
 
     assets = [
         _asset_manifest(tmp, nsh_name),
@@ -593,61 +628,104 @@ def _convert_package(
     }
 
 
-def _convert_charts(entry: dict[str, Any], tmp: Path) -> list[dict[str, Any]]:
+def _first_note_ms(fumen: FumenCourse) -> float:
+    """Time of the earliest note, in ms from the start of the audio.
+
+    Fumen measure offsets exclude an implicit 4/4 lead measure that the game
+    adds back at playback time, so it has to be added back here as well.
+    """
+    return min(
+        (measure.offset_start + (4 * 60_000.0 / measure.bpm) + note.pos
+         for measure in fumen.measures if measure.bpm
+         for branch in measure.branches.values()
+         for note in branch.notes),
+        default=math.inf,
+    )
+
+
+def _lead_in_ms(fumens: list[FumenCourse]) -> int:
+    """How much silence to prepend so the first note isn't unreactable.
+
+    Some charts put a run of notes on the very first beat of the audio. The
+    game doesn't compensate for that, so the notes are on the judgement line
+    before the player can see them.
+    """
+    target = settings.min_lead_in_ms
+    earliest = min((_first_note_ms(fumen) for fumen in fumens), default=math.inf)
+    if not target or not math.isfinite(earliest):
+        return 0
+    return max(0, round(target - earliest))
+
+
+def _shift_fumen(fumen: FumenCourse, lead_in_ms: int) -> None:
+    """Move the whole chart back, to stay in sync with the padded audio."""
+    for measure in fumen.measures:
+        measure.offset_start += lead_in_ms
+        measure.offset_end += lead_in_ms
+
+
+def _convert_charts(entry: dict[str, Any], tmp: Path) -> tuple[list[dict[str, Any]], int]:
     parsed = parse_tja(str(entry["tja_path"]))
     song_id = str(entry["id"])
-    out: list[dict[str, Any]] = []
+    converted: list[tuple[dict[str, Any], str, FumenCourse]] = []
     for course in entry.get("courses", []):
         course_id = str(course["id"])
         course_name = COURSE_NAME_BY_ID.get(course_id)
         if course_name is None or course_name not in parsed.courses:
             continue
-        chart = f"solo/{song_id}_{course_id}.bin"
-        path = tmp / chart
         fumen = convert_tja_to_fumen(parsed.courses[course_name])
         fumen.header.order = ">"
         fix_dk_note_types_course(fumen)
-        write_fumen(str(path), fumen)
-        out.append({
+        converted.append(({
             "id": course_id,
             "label": course.get("label", course_name),
             "stars": course.get("stars", 0),
-            "chart": chart,
-            "size": path.stat().st_size,
-            "sha1": _sha1_file(path),
-        })
-    return out
+        }, f"solo/{song_id}_{course_id}.bin", fumen))
+
+    # All courses share one audio file, so they all get the same lead-in.
+    lead_in = _lead_in_ms([fumen for _, _, fumen in converted])
+    out: list[dict[str, Any]] = []
+    for meta, chart, fumen in converted:
+        _shift_fumen(fumen, lead_in)
+        path = tmp / chart
+        write_fumen(str(path), fumen)
+        out.append({**meta, "chart": chart, "size": path.stat().st_size,
+                    "sha1": _sha1_file(path)})
+    return out, lead_in
 
 
-def _convert_osz_charts(entry: dict[str, Any], tmp: Path) -> list[dict[str, Any]]:
+def _convert_osz_charts(entry: dict[str, Any], tmp: Path) -> tuple[list[dict[str, Any]], int]:
     archive = Path(str(entry["osz_path"]))
     song_id = str(entry["id"])
-    out: list[dict[str, Any]] = []
+    converted: list[tuple[dict[str, Any], str, FumenCourse]] = []
     for course in entry.get("courses", []):
         course_id = str(course["id"])
         course_name = COURSE_NAME_BY_ID.get(course_id)
         member = str(course.get("osu_member") or "")
         if course_name is None or not member:
             continue
-        chart = f"solo/{song_id}_{course_id}.bin"
-        path = tmp / chart
         raw = osu.read_member(archive, member, osu.MAX_OSU_BYTES)
         fumen = osu.fumen_from_osu(raw, course_name, int(course.get("stars") or 1))
-        write_fumen(str(path), fumen)
-        out.append({
+        converted.append(({
             "id": course_id,
             "label": course.get("label", course_name),
             "stars": course.get("stars", 0),
             "osu_stars": course.get("osu_stars"),
             "version": course.get("version", ""),
-            "chart": chart,
-            "size": path.stat().st_size,
-            "sha1": _sha1_file(path),
-        })
-    return out
+        }, f"solo/{song_id}_{course_id}.bin", fumen))
+
+    lead_in = _lead_in_ms([fumen for _, _, fumen in converted])
+    out: list[dict[str, Any]] = []
+    for meta, chart, fumen in converted:
+        _shift_fumen(fumen, lead_in)
+        path = tmp / chart
+        write_fumen(str(path), fumen)
+        out.append({**meta, "chart": chart, "size": path.stat().st_size,
+                    "sha1": _sha1_file(path)})
+    return out, lead_in
 
 
-def _convert_audio(source: Path, nub: Path, nsh: Path) -> None:
+def _convert_audio(source: Path, nub: Path, nsh: Path, lead_in_ms: int = 0) -> None:
     if not settings.ps3_at3tool_path.is_file():
         raise RuntimeError(f"ps3_at3tool.exe not found: {settings.ps3_at3tool_path}")
     with tempfile.TemporaryDirectory(prefix="tjarepo-audio-") as tmpdir:
@@ -657,11 +735,14 @@ def _convert_audio(source: Path, nub: Path, nsh: Path) -> None:
         # ffmpeg (not sox): sox's libmad decoder ignores LAME gapless tags,
         # leaving ~25-50ms of encoder-delay silence at the start of mp3s,
         # which made every osu! note land early relative to the audio.
+        # `adelay` prepends the lead-in silence that _lead_in_ms() asked for;
+        # the charts have already been moved back by the same amount.
         _run([
             settings.ffmpeg_path,
             "-y",
             "-loglevel", "error",
             "-i", str(source),
+            *(["-af", f"adelay={lead_in_ms}:all=1"] if lead_in_ms > 0 else []),
             "-ar", "48000",
             "-ac", "2",
             "-c:a", "pcm_s16le",

@@ -2,6 +2,7 @@
   import MoonIcon from "@lucide/svelte/icons/moon";
   import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
   import LibraryBigIcon from "@lucide/svelte/icons/library-big";
+  import LockKeyholeIcon from "@lucide/svelte/icons/lock-keyhole";
   import ServerIcon from "@lucide/svelte/icons/server";
   import SunIcon from "@lucide/svelte/icons/sun";
   import UnplugIcon from "@lucide/svelte/icons/unplug";
@@ -13,6 +14,8 @@
   import CabinetDashboard from "$lib/components/CabinetDashboard.svelte";
   import CabinetList from "$lib/components/CabinetList.svelte";
   import LibraryManager from "$lib/components/LibraryManager.svelte";
+  import ManagementDialog from "$lib/components/ManagementDialog.svelte";
+  import { lock, management, refreshManagement } from "$lib/management.svelte.js";
   import type { Cabinet, Library } from "$lib/types.js";
 
   const token = "";
@@ -91,6 +94,7 @@
   onMount(() => {
     applyTheme();
     connect();
+    refreshManagement();
     const timer = window.setInterval(() => refreshCabinets(true), 10_000);
     const visibleRefresh = () => { if (!document.hidden) refreshCabinets(true); };
     document.addEventListener("visibilitychange", visibleRefresh);
@@ -121,6 +125,9 @@
           <Button variant={view === "library" ? "secondary" : "ghost"} size="sm" onclick={() => view = "library"}><LibraryBigIcon /> Song library</Button>
         </div>
         <Button variant="ghost" size="icon" aria-label="Refresh cabinets" onclick={() => refreshCabinets(false)}><RefreshCwIcon class={refreshing ? "animate-spin" : ""} /></Button>
+      {/if}
+      {#if management.unlocked}
+        <Button variant="ghost" size="icon" aria-label="Lock management controls" title="Lock management controls" onclick={lock}><LockKeyholeIcon /></Button>
       {/if}
       <Button variant="ghost" size="icon" aria-label="Toggle color theme" onclick={() => { dark = !dark; applyTheme(); }}>
         {#if dark}<SunIcon />{:else}<MoonIcon />{/if}
@@ -166,3 +173,5 @@
     {/if}
   {/if}
 </main>
+
+<ManagementDialog />

@@ -469,7 +469,13 @@ def _hit_events(parsed: ParsedBeatmap, red_points: list[TimingPoint]) -> list[Hi
                 pixel_length * red.beat_length /
                 (100.0 * parsed.slider_multiplier * max(0.01, scroll))
             )
-            if span_duration < red.beat_length:
+            # osu!taiko turns a slider into a drum roll unless the *whole*
+            # slider (all of its spans) is shorter than two beats, in which
+            # case it becomes a short run of hits. Charters write long rolls
+            # as a tiny slider repeated dozens of times, so comparing a single
+            # span against a beat turned those rolls into unhittable streams.
+            duration = span_duration * spans
+            if duration < 2 * red.beat_length:
                 edge_sounds = [sound] * (spans + 1)
                 if len(fields) > 8 and fields[8]:
                     try:
@@ -480,7 +486,6 @@ def _hit_events(parsed: ParsedBeatmap, red_points: list[TimingPoint]) -> list[Hi
                     edge_sound = edge_sounds[edge] if edge < len(edge_sounds) else sound
                     events.append(HitEvent(start + span_duration * edge, _note_type(edge_sound)))
             else:
-                duration = span_duration * spans
                 events.append(
                     HitEvent(start, "DRUMROLL" if sound & 4 else "Drumroll", duration)
                 )

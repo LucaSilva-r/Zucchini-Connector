@@ -112,7 +112,7 @@ def manage_library() -> dict[str, object]:
     return library_admin.management_library()
 
 
-@ui_api.post("/library/upload/osz")
+@ui_api.post("/library/upload/osz", dependencies=[Depends(auth.require_management)])
 async def library_upload_osz(
     file: UploadFile = File(...), category: str = Form(...)
 ) -> dict[str, object]:
@@ -122,7 +122,7 @@ async def library_upload_osz(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@ui_api.post("/library/upload/tja")
+@ui_api.post("/library/upload/tja", dependencies=[Depends(auth.require_management)])
 async def library_upload_tja(
     files: list[UploadFile] = File(...), category: str = Form(...)
 ) -> dict[str, object]:
@@ -132,7 +132,7 @@ async def library_upload_tja(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@ui_api.post("/library/songs/delete-batch")
+@ui_api.post("/library/songs/delete-batch", dependencies=[Depends(auth.require_management)])
 def library_delete_songs(song_ids: list[str] = Body(embed=True)) -> dict[str, object]:
     if len(song_ids) > 4096:
         raise HTTPException(status_code=413, detail="Batch exceeds 4096 songs")
@@ -142,7 +142,7 @@ def library_delete_songs(song_ids: list[str] = Body(embed=True)) -> dict[str, ob
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@ui_api.delete("/library/songs/{song_id}")
+@ui_api.delete("/library/songs/{song_id}", dependencies=[Depends(auth.require_management)])
 def library_delete_song(song_id: str) -> dict[str, str]:
     try:
         return library_admin.delete_song(song_id)
@@ -152,7 +152,19 @@ def library_delete_song(song_id: str) -> dict[str, str]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@ui_api.post("/library/songs/{song_id}/retry")
+@ui_api.post("/library/convert-all", dependencies=[Depends(auth.require_management)])
+def library_convert_all(include_failed: bool = False) -> Response:
+    return _json(converter.convert_all(include_failed=include_failed), 202)
+
+
+@ui_api.post("/library/songs/reconvert-batch", dependencies=[Depends(auth.require_management)])
+def library_reconvert_songs(song_ids: list[str] = Body(embed=True)) -> Response:
+    if len(song_ids) > 4096:
+        raise HTTPException(status_code=413, detail="Batch exceeds 4096 songs")
+    return _json(converter.reconvert_many([s for s in song_ids if s]), 202)
+
+
+@ui_api.post("/library/songs/{song_id}/retry", dependencies=[Depends(auth.require_management)])
 def library_retry_song(song_id: str) -> Response:
     data = converter.retry(song_id)
     return _json(data, 404 if data.get("status") == "not_found" else 202)
@@ -333,7 +345,7 @@ def cabinet_delete(cabinet_id: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
-@ui_api.post("/cabinets/{cabinet_id}/resync")
+@ui_api.post("/cabinets/{cabinet_id}/resync", dependencies=[Depends(auth.require_management)])
 def cabinet_resync(cabinet_id: str) -> dict[str, object]:
     cab = cabinets.force_resync(cabinet_id)
     if cab is None:

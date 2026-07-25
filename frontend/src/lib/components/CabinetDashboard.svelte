@@ -8,7 +8,7 @@
   import { deleteCabinet, resyncCabinet } from "$lib/api.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
-  import { Button, buttonVariants } from "$lib/components/ui/button/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import ConfigPanel from "$lib/components/ConfigPanel.svelte";
@@ -16,6 +16,7 @@
   import RemoteControl from "$lib/components/RemoteControl.svelte";
   import SongSelection from "$lib/components/SongSelection.svelte";
   import UpdatePanel from "$lib/components/UpdatePanel.svelte";
+  import { ensureManagement } from "$lib/management.svelte.js";
   import type { Cabinet, Library } from "$lib/types.js";
 
   let { token, cabinet, library, onUpdated, onDeleted }: {
@@ -27,6 +28,7 @@
   } = $props();
 
   let deleting = $state(false);
+  let forgetOpen = $state(false);
   let deleteError = $state("");
   let resyncing = $state(false);
   const liveCabinetId = $derived(cabinet.cabinet_id);
@@ -68,6 +70,7 @@
   });
 
   async function forceResync() {
+    if (!(await ensureManagement())) return;
     resyncing = true;
     try {
       onUpdated(await resyncCabinet(token, cabinet.cabinet_id));
@@ -104,6 +107,11 @@
       .map((id) => ({ id, title: titles.get(id) }));
   });
 
+  // PIN first, then the confirmation.
+  async function requestForget() {
+    if (await ensureManagement()) forgetOpen = true;
+  }
+
   async function forgetCabinet() {
     deleting = true;
     deleteError = "";
@@ -131,34 +139,30 @@
           {#if pending}<Badge variant="outline" class="text-amber-700 dark:text-amber-400"><Clock3Icon /> Sync pending</Badge>{:else}<Badge variant="outline" class="text-emerald-700 dark:text-emerald-400"><CircleCheckIcon /> Synced</Badge>{/if}
         </div>
         <Card.Title class="truncate text-lg">{cabinet.name || "Unnamed cabinet"}</Card.Title>
-        <Card.Description class="mt-0.5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs">
+        <Card.Description class="mt-0.5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs break-all">
           <span>ID {cabinet.cabinet_id}</span><span>Serial {cabinet.serial || "—"}</span><span>Zucchini {cabinet.version || "—"}</span>
         </Card.Description>
       </div>
 
-      <div class="min-w-52">
-        <ManagementGate compact>
-          <AlertDialog.Root>
-            <AlertDialog.Trigger class={buttonVariants({ variant: "outline", size: "sm" })}>
-              <Trash2Icon /> Forget cabinet
-            </AlertDialog.Trigger>
-            <AlertDialog.Content>
-              <AlertDialog.Header>
-                <AlertDialog.Title>Forget {cabinet.name || cabinet.cabinet_id}?</AlertDialog.Title>
-                <AlertDialog.Description>
-                  Its saved selection and queued settings will be removed. The cabinet will appear again at its next poll.
-                </AlertDialog.Description>
-              </AlertDialog.Header>
-              {#if deleteError}<p class="text-sm text-destructive">{deleteError}</p>{/if}
-              <AlertDialog.Footer>
-                <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-                <AlertDialog.Action variant="destructive" disabled={deleting} onclick={forgetCabinet}>
-                  {deleting ? "Forgetting…" : "Forget cabinet"}
-                </AlertDialog.Action>
-              </AlertDialog.Footer>
-            </AlertDialog.Content>
-          </AlertDialog.Root>
-        </ManagementGate>
+      <div class="shrink-0">
+        <Button variant="outline" size="sm" onclick={requestForget}><Trash2Icon /> Forget cabinet</Button>
+        <AlertDialog.Root bind:open={forgetOpen}>
+          <AlertDialog.Content>
+            <AlertDialog.Header>
+              <AlertDialog.Title>Forget {cabinet.name || cabinet.cabinet_id}?</AlertDialog.Title>
+              <AlertDialog.Description>
+                Its saved selection and queued settings will be removed. The cabinet will appear again at its next poll.
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            {#if deleteError}<p class="text-sm text-destructive">{deleteError}</p>{/if}
+            <AlertDialog.Footer>
+              <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+              <AlertDialog.Action variant="destructive" disabled={deleting} onclick={forgetCabinet}>
+                {deleting ? "Forgetting…" : "Forget cabinet"}
+              </AlertDialog.Action>
+            </AlertDialog.Footer>
+          </AlertDialog.Content>
+        </AlertDialog.Root>
       </div>
     </div>
 
@@ -205,7 +209,7 @@
         </div>
         <ul class="mt-1.5 grid max-h-40 gap-0.5 overflow-y-auto text-xs text-muted-foreground">
           {#each missingSongs as song (song.id)}
-            <li class="flex items-baseline gap-2"><span class="truncate">{song.title ?? "Unavailable song"}</span><span class="shrink-0 font-mono text-[10px]">{song.id}</span></li>
+            <li class="flex min-w-0 items-baseline gap-2"><span class="truncate">{song.title ?? "Unavailable song"}</span><span class="truncate font-mono text-[10px]">{song.id}</span></li>
           {/each}
         </ul>
         <p class="mt-1.5 text-xs text-muted-foreground">The cabinet failed to download or verify these during its last sync. Use Force resync to retry them.</p>
@@ -215,11 +219,11 @@
 
   <Card.Content class="p-3 sm:p-4">
     <Tabs.Root value="songs">
-      <Tabs.List class="mb-3">
-        <Tabs.Trigger value="songs">Song library</Tabs.Trigger>
-        <Tabs.Trigger value="control">Remote control</Tabs.Trigger>
-        <Tabs.Trigger value="config">Configuration</Tabs.Trigger>
-        <Tabs.Trigger value="update">Zucchini update</Tabs.Trigger>
+      <Tabs.List class="mb-3 max-w-full">
+        <Tabs.Trigger value="songs">Library</Tabs.Trigger>
+        <Tabs.Trigger value="control">Control</Tabs.Trigger>
+        <Tabs.Trigger value="config">Config</Tabs.Trigger>
+        <Tabs.Trigger value="update">Update</Tabs.Trigger>
       </Tabs.List>
       <Tabs.Content value="songs"><SongSelection {token} {cabinet} {library} onSaved={onUpdated} /></Tabs.Content>
       <Tabs.Content value="control"><ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate></Tabs.Content>
