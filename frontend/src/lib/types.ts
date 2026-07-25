@@ -14,7 +14,6 @@ export type Cabinet = {
   queued_selection: string[] | null;
   selection_seq: number;
   acked_seq: number;
-  sync_proto: number;
   desired_ack: number;
   active_seq: number;
   verify_generation: number;

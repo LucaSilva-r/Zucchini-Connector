@@ -11,7 +11,10 @@
     onSelect: (id: string) => void;
   } = $props();
 
-  const isOnline = (cabinet: Cabinet) => Date.now() / 1000 - cabinet.last_seen <= 30;
+  // The control socket is the liveness signal now that the cabinet no longer
+  // polls; last_seen only backs it up across a reconnect.
+  const isOnline = (cabinet: Cabinet) =>
+    cabinet.control_online || Date.now() / 1000 - cabinet.last_seen <= 30;
   const isPending = (cabinet: Cabinet) =>
     Object.keys(cabinet.config_pending).length > 0 || cabinet.acked_seq < cabinet.selection_seq;
 

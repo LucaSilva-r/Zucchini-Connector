@@ -3,7 +3,7 @@
 One JSON file per cabinet under settings.cabinets_root, keyed by the
 plugin-generated cabinet_id (dongle serials collide across cabinets).
 The poll protocol is plain text both ways so the PS3 side needs no JSON
-writer; see handle_poll().
+writer; see handle_frame().
 """
 from __future__ import annotations
 
@@ -45,7 +45,6 @@ _DEFAULT = {
     "queued_selection": None,
     "selection_seq": 0,
     "acked_seq": 0,
-    "sync_proto": 1,
     "desired_ack": 0,
     "active_seq": 0,
     "verify_generation": 0,
@@ -123,10 +122,7 @@ def set_selection(cabinet_id: str, song_ids: list[str]) -> dict | None:
             return None
         selection = sorted(set(song_ids))
         cab["managed"] = True
-        accepted_seq = (
-            cab["desired_ack"] if cab["sync_proto"] >= 2 else cab["acked_seq"]
-        )
-        if cab["selection_seq"] > accepted_seq:
+        if cab["selection_seq"] > cab["desired_ack"]:
             # The active sequence is immutable. Operators may keep editing,
             # but only the latest draft becomes the next job after its ack.
             cab["queued_selection"] = (
@@ -147,10 +143,7 @@ def force_resync(cabinet_id: str) -> dict | None:
         cab = load(cabinet_id)
         if cab is None or not cab["managed"]:
             return cab
-        if cab["sync_proto"] >= 2:
-            cab["verify_generation"] += 1
-        else:
-            cab["selection_seq"] += 1
+        cab["verify_generation"] += 1
         _save(cab)
         return cab
 
@@ -297,8 +290,7 @@ def _command_text(cab: dict, mark_update_dispatched: bool) -> str:
         lines.append("managed=1")
         lines.append(f"seq={cab['selection_seq']}")
         lines.extend(f"sel {sid}" for sid in cab["selection"])
-        if cab["sync_proto"] >= 2:
-            lines.append(f"verify={cab['verify_generation']}")
+        lines.append(f"verify={cab['verify_generation']}")
     lines.extend(f"cfg {k}={v}" for k, v in cab["config_pending"].items())
     pending = cab["update_pending"]
     if pending:
@@ -314,26 +306,28 @@ def _command_text(cab: dict, mark_update_dispatched: bool) -> str:
 def command_for(cabinet_id: str) -> str:
     """Return the current authoritative command snapshot for WebSocket push.
 
-    It deliberately uses the same text grammar as the legacy poll response,
-    allowing old HTTP polling to remain a reconciliation fallback.
     """
     with _lock:
         cab = load(cabinet_id)
         return _command_text(cab, True) if cab is not None else "\n"
 
 
-def handle_poll(body: str) -> str:
-    """Heartbeat + ack + fetch-pending, one round trip.
+def handle_frame(body: str, inventory: bool) -> str:
+    """Apply one cabinet frame from the control socket.
 
-    Request lines: id=, serial=, name=, game=, version=, flavor=, seq=,
+    `inventory` is True for a full `H` heartbeat and False for a compact `T`
+    status frame. Both share this grammar; only the heartbeat carries a
+    complete `have` list and the config body, so only it may replace them.
+
+    Lines: id=, serial=, name=, game=, version=, flavor=, seq=,
     op_seq=, op_phase=, op_done=, op_total=, op_failed=, op_song=,
     op_error=, update_ack=, update_work_id=, update_phase=,
     update_done=, update_total=, update_error=,
-    applied=<section.key>=<value> (repeatable), have <song_id> (repeatable),
-    then a blank line and the raw taiko_config.cfg contents.
+    applied=<section.key>=<value> (repeatable), have <song_id> (repeatable,
+    heartbeat only), then a blank line and the raw taiko_config.cfg contents.
 
-    Response lines: managed=1, seq=N, cfg <section.key>=<value>,
-    sel <song_id>, update <sha1> <size> <version>.
+    Returns the command text for this cabinet: managed=1, seq=N,
+    cfg <section.key>=<value>, sel <song_id>, update <sha1> <size> <version>.
     """
     head, _, raw_cfg = body.partition("\n\n")
     fields: dict[str, str] = {}
@@ -371,17 +365,11 @@ def handle_poll(body: str) -> str:
         cab["game_name"] = GAME_NAMES.get(cab["game"], cab["game"])
         cab["version"] = fields.get("version", cab["version"])
         cab["flavor"] = fields.get("flavor", cab["flavor"])
-        try:
-            cab["sync_proto"] = max(
-                cab["sync_proto"], int(fields.get("sync_proto", "1"))
-            )
-        except ValueError:
-            pass
         cab["last_seen"] = int(time.time())
-        # Long song operations own and mutate the in-memory cache index. During
-        # that window the cabinet sends have_complete=0 and omits the list;
-        # retain the last complete inventory instead of flashing back to zero.
-        if fields.get("have_complete", "1") != "0":
+        # A status frame carries no inventory: the cabinet only sends a
+        # heartbeat when it has a complete one, so retain the last complete
+        # list instead of flashing back to zero mid-operation.
+        if inventory:
             cab["have"] = have
             have_set = set(have)
             cab["package_states"] = {
@@ -392,11 +380,10 @@ def handle_poll(body: str) -> str:
         if raw_cfg.strip():
             cab["reported_cfg"] = raw_cfg
         for item in applied:
-            key, sep, value = item.partition("=")
-            # New clients include the applied value, preventing a delayed ack
-            # from clearing a newer value queued for the same key. Keep bare
-            # key support for the original POC client.
-            if not sep or cab["config_pending"].get(key) == value:
+            key, _, value = item.partition("=")
+            # The ack carries the applied value, so a delayed ack cannot clear
+            # a newer value queued for the same key.
+            if cab["config_pending"].get(key) == value:
                 cab["config_pending"].pop(key, None)
         if raw_cfg.strip():
             reported = _parse_reported_cfg(raw_cfg)
@@ -491,10 +478,8 @@ def handle_poll(body: str) -> str:
 
         # Promote exactly one queued edit only after the cabinet atomically
         # applied and acknowledged the immutable active sequence.
-        accepted_seq = (
-            cab["desired_ack"] if cab["sync_proto"] >= 2 else cab["acked_seq"]
-        )
-        if accepted_seq >= cab["selection_seq"] and cab["queued_selection"] is not None:
+        if (cab["desired_ack"] >= cab["selection_seq"]
+                and cab["queued_selection"] is not None):
             queued = cab["queued_selection"]
             cab["queued_selection"] = None
             if queued != cab["selection"]:

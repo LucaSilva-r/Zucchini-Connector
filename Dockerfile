@@ -34,4 +34,8 @@ RUN mkdir -p /app/storage/SONGS/TJA /app/storage/SONGS/OSU /app/storage/SONGS/CO
 
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/connector-entrypoint"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]
+# Cabinets treat 60 s of inbound silence on the control socket as a dead link
+# and reconnect. These pings are the only guaranteed inbound traffic, so the
+# interval is pinned here rather than left to uvicorn defaults.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", \
+     "--ws", "websockets", "--ws-ping-interval", "20", "--ws-ping-timeout", "20"]

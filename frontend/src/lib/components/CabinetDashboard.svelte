@@ -77,7 +77,7 @@
       resyncing = false;
     }
   }
-  const online = $derived(Date.now() / 1000 - cabinet.last_seen <= 30);
+  const online = $derived(cabinet.control_online || Date.now() / 1000 - cabinet.last_seen <= 30);
   const pending = $derived(Object.keys(cabinet.config_pending).length > 0 || cabinet.active_seq < cabinet.selection_seq || cabinet.queued_selection !== null || cabinet.update_pending !== null);
   const desiredCount = $derived((cabinet.queued_selection ?? cabinet.selection).length);
   const stalePackages = $derived(Object.values(cabinet.package_states).filter((pkg) => pkg.state === "stale").length);

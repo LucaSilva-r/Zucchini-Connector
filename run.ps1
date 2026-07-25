@@ -178,5 +178,9 @@ Check-ConnectorFirewall -Port $port
 Write-Host "[run] web UI: https://localhost:$port/ui"
 # tja2fumen is vendored inside app\ and imported as a top-level module.
 $env:PYTHONPATH = (Join-Path $PSScriptRoot "app") + $(if ($env:PYTHONPATH) { ";" + $env:PYTHONPATH } else { "" })
+# Cabinets treat 60 s of inbound silence on the control socket as a dead link
+# and reconnect. These pings are the only guaranteed inbound traffic, so the
+# interval is pinned here rather than left to uvicorn defaults.
 & $venvPy -m uvicorn app.main:app --host 0.0.0.0 --port $port `
+    --ws websockets --ws-ping-interval 20 --ws-ping-timeout 20 `
     --ssl-certfile $crt --ssl-keyfile $key

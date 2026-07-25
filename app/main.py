@@ -291,12 +291,6 @@ def _json(data: dict[str, object], code: int) -> Response:
     )
 
 
-@cabinet_api.post("/cabinet/poll", dependencies=[Depends(require_token)])
-async def cabinet_poll(request: Request) -> Response:
-    body = (await request.body()).decode("utf-8", errors="replace")
-    return Response(cabinets.handle_poll(body), media_type="text/plain")
-
-
 @cabinet_api.websocket("/cabinet/control")
 async def cabinet_control(websocket: WebSocket, id: str = "") -> None:
     await control.hub.cabinet(websocket, id)

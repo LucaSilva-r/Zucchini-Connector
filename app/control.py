@@ -37,6 +37,10 @@ BUTTON_BITS = {
 }
 BUTTON_MASK = (1 << len(BUTTON_BITS)) - 1
 MAX_MESSAGE_BYTES = 4096
+# `H\n` heartbeats carry the cabinet's whole song inventory plus its config
+# file. The cabinet builds them in a fixed 192 KiB buffer and refuses to send
+# anything larger, so this only has to be a sane ceiling above that.
+MAX_HEARTBEAT_BYTES = 256 * 1024
 
 
 def _token_ok(candidate: str) -> bool:
@@ -85,6 +89,26 @@ class ControlHub:
     def _get(self, table: dict[str, WebSocket], cabinet_id: str) -> WebSocket | None:
         with self._lock:
             return table.get(cabinet_id)
+
+    async def request_inventory(self, cabinet_id: str) -> bool:
+        """Ask a cabinet to push a fresh `H` snapshot.
+
+        The cabinet sends one unprompted on connect and whenever its library or
+        config actually changes, so this is only for the cases the connector
+        cannot infer — an operator opening a dashboard against state this
+        process never saw. It is never called on a timer: the snapshot is
+        ~100 KiB and the cabinet builds and sends it on the same thread that
+        services remote input.
+        """
+        cabinet = self._get(self._cabinets, cabinet_id)
+        if cabinet is None:
+            return False
+        try:
+            await cabinet.send_text("R\n")
+            return True
+        except RuntimeError:
+            self._remove(self._cabinets, cabinet_id, cabinet)
+            return False
 
     async def _operator_status(self, cabinet_id: str, online: bool) -> None:
         operator = self._get(self._operators, cabinet_id)
@@ -135,15 +159,20 @@ class ControlHub:
                     message = await asyncio.wait_for(
                         websocket.receive_text(), timeout=0.25
                     )
-                    if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
+                    # `H\n` is the full heartbeat (inventory + config); `T\n` is
+                    # compact operation telemetry. Same grammar, same handler,
+                    # different size budget and inventory authority.
+                    is_heartbeat = message.startswith("H\n")
+                    limit = MAX_HEARTBEAT_BYTES if is_heartbeat else MAX_MESSAGE_BYTES
+                    if len(message.encode("utf-8")) > limit:
                         await websocket.close(code=1009, reason="Message too large")
                         break
-                    if message.startswith("T\n"):
-                        telemetry = message[2:]
+                    if is_heartbeat or message.startswith("T\n"):
+                        frame = message[2:]
                         reported_id = next(
                             (
                                 line[3:].strip()
-                                for line in telemetry.splitlines()
+                                for line in frame.splitlines()
                                 if line.startswith("id=")
                             ),
                             "",
@@ -153,7 +182,7 @@ class ControlHub:
                                 code=1008, reason="Cabinet ID mismatch"
                             )
                             break
-                        cabinets.handle_poll(telemetry)
+                        cabinets.handle_frame(frame, inventory=is_heartbeat)
                         await self._broadcast_status(cabinet_id)
                 except asyncio.TimeoutError:
                     pass
@@ -177,6 +206,11 @@ class ControlHub:
         with self._lock:
             self._viewers.setdefault(cabinet_id, set()).add(websocket)
         await self._broadcast_status(cabinet_id)
+        # An operator is now looking at this cabinet: make sure what they see
+        # is current rather than whatever the last change event left behind.
+        cab = cabinets.load(cabinet_id)
+        if cab is None or not cab["have"]:
+            await self.request_inventory(cabinet_id)
         try:
             while True:
                 await websocket.receive_text()
