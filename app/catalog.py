@@ -219,7 +219,7 @@ def start_library_watch() -> bool:
             except Exception as exc:  # keep the watch alive on scan errors
                 print(f"[connector] library rescan failed: {exc}", flush=True)
 
-    Thread(target=_worker, daemon=True, name="tjarepo-library-watch").start()
+    Thread(target=_worker, daemon=True, name="connector-library-watch").start()
     _WATCH_ACTIVE = True
     return True
 
@@ -253,9 +253,9 @@ def _build_library() -> dict[str, Any]:
                     # Flat "id:stars,..." in canonical order so the PS3 gets star
                     # counts straight from the index — no per-song conversion.
                     "diffs": _diffs_str(s.get("courses") or []),
-                    # `rev` remains for old cabinets. Protocol-2 cabinets use
-                    # the complete package revision, avoiding prefix-only
-                    # freshness decisions.
+                    # Short prefix used as the conversion-status cache key on
+                    # the management page; cabinets make freshness decisions
+                    # from the complete package_revision below.
                     "rev": package_revision(s)[:12],
                     "source_revision": source_revision(s),
                     "package_revision": package_revision(s),

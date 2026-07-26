@@ -65,9 +65,7 @@ API base:
 https://localhost:8443/api/connector
 ```
 
-`/api/tjarepo` is still served as a legacy alias so sprx builds predating the
-rename keep working. `CONNECTOR_*` environment variables are preferred;
-`TJAREPO_*` names still work as fallbacks.
+Configuration comes from `CONNECTOR_*` environment variables.
 
 The compose file mounts:
 

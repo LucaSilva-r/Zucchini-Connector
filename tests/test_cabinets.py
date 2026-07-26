@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import os
-import tempfile
 import unittest
-
-os.environ.setdefault("CONNECTOR_CABINETS_ROOT", tempfile.mkdtemp())
 
 from app import cabinets
 from app.config import settings
@@ -18,6 +14,7 @@ POLL = (
     "version=1.5.0\n"
     "seq=0\n"
     "have tja_x1\n"
+    "have_count=1\n"
     "\n"
     "[network]\nconnector_host = 10.0.0.2\n"
     "[chassis]\nforce_freeplay = 0\n"
@@ -60,8 +57,9 @@ class CabinetPollTests(unittest.TestCase):
         self.assertIn("cfg chassis.force_freeplay=1", resp)
 
         acked = POLL.replace("seq=0", "seq=1").replace(
-            "have tja_x1",
-            "have tja_x1\nhave tja_y2\napplied=chassis.force_freeplay=1",
+            "have tja_x1\nhave_count=1",
+            "have tja_x1\nhave tja_y2\nhave_count=2\n"
+            "applied=chassis.force_freeplay=1",
         )
         resp = heartbeat(acked)
         self.assertNotIn("cfg ", resp)

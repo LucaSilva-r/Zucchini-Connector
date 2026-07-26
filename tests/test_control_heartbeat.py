@@ -11,11 +11,7 @@ which is not a dependency of this project.
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 import unittest
-
-os.environ.setdefault("CONNECTOR_CABINETS_ROOT", tempfile.mkdtemp())
 
 from fastapi import WebSocketDisconnect
 
@@ -36,6 +32,7 @@ HEARTBEAT = (
     "seq=0\n"
     "have tja_x1\n"
     "have tja_x2\n"
+    "have_count=2\n"
     "\n"
     "[network]\nconnector_host = 10.0.0.2\n"
 )
@@ -46,6 +43,13 @@ TELEMETRY = (
     "op_phase=downloading\nop_done=1\nop_total=2\nop_failed=0\n"
     "op_song=tja_x2\nop_error=\n"
     "\n"
+)
+
+
+PACKAGES = (
+    "P\n"
+    f"id={CABINET_ID}\n"
+    "pkg tja_x1 " + "a" * 40 + " installed\n"
 )
 
 
@@ -61,6 +65,7 @@ class StubSocket:
         self.headers: dict[str, str] = {}
         self.incoming = list(incoming)
         self.sent: list[str] = []
+        self.sent_json: list[dict] = []
         self.closed: tuple[int, str] | None = None
         self.hold = hold
         self.released = asyncio.Event()
@@ -80,6 +85,9 @@ class StubSocket:
 
     async def send_text(self, text: str) -> None:
         self.sent.append(text)
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent_json.append(payload)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = (code, reason)
@@ -120,6 +128,39 @@ class ControlHeartbeatTests(unittest.TestCase):
         self.assertEqual(cab["have"], ["tja_x1", "tja_x2"])
         self.assertEqual(cab["operation_phase"], "downloading")
 
+    def test_package_frame_does_not_clear_inventory(self) -> None:
+        """`P` carries advisory package state only; `have` stays the heartbeat's."""
+        run([HEARTBEAT, PACKAGES])
+        cab = cabinets.load(CABINET_ID)
+        self.assertEqual(cab["have"], ["tja_x1", "tja_x2"])
+        self.assertEqual(cab["package_states"]["tja_x1"]["state"], "installed")
+
+    def test_truncated_inventory_is_rejected(self) -> None:
+        """A `have` list shorter than its own have_count must not be trusted."""
+        run([HEARTBEAT])
+        truncated = (
+            "H\n"
+            f"id={CABINET_ID}\n"
+            "have tja_x1\n"
+            "have_count=2\n"
+            "\n"
+        )
+        run([truncated])
+        cab = cabinets.load(CABINET_ID)
+        self.assertEqual(cab["have"], ["tja_x1", "tja_x2"])
+
+    def test_complete_inventory_with_matching_count_is_applied(self) -> None:
+        run([HEARTBEAT])
+        replacement = (
+            "H\n"
+            f"id={CABINET_ID}\n"
+            "have tja_x3\n"
+            "have_count=1\n"
+            "\n"
+        )
+        run([replacement])
+        self.assertEqual(cabinets.load(CABINET_ID)["have"], ["tja_x3"])
+
     def test_heartbeat_id_must_match_the_connection(self) -> None:
         socket = run([HEARTBEAT.replace(f"id={CABINET_ID}", "id=deadbeef")])
         self.assertIsNotNone(socket.closed)
@@ -158,18 +199,53 @@ class ControlHeartbeatTests(unittest.TestCase):
         asyncio.run(scenario())
         self.assertIn("R\n", socket.sent)
 
+    def test_reconnect_teardown_does_not_mark_the_cabinet_offline(self) -> None:
+        """The old socket finishes after the new one registered; it must not
+        announce offline, or the operator view sticks at "Cabinet offline"."""
+        hub = ControlHub()
+        operator = StubSocket([], hold=True)
+        first = StubSocket([HEARTBEAT], hold=True)
+        second = StubSocket([HEARTBEAT], hold=True)
+
+        async def settle() -> None:
+            for _ in range(50):
+                await asyncio.sleep(0)
+
+        async def scenario() -> None:
+            hub._operators[CABINET_ID] = operator  # stand in for a control page
+            task_a = asyncio.ensure_future(hub.cabinet(first, CABINET_ID))
+            await settle()
+            # Reconnect: the new socket takes the slot, then the old one ends.
+            task_b = asyncio.ensure_future(hub.cabinet(second, CABINET_ID))
+            await settle()
+            first.release()
+            await task_a
+            await settle()
+            self.assertTrue(hub.status(CABINET_ID)["control_online"])
+            self.assertEqual(
+                [msg["online"] for msg in operator.sent_json], [True, True]
+            )
+            second.release()
+            await task_b
+            self.assertFalse(hub.status(CABINET_ID)["control_online"])
+            self.assertEqual(operator.sent_json[-1]["online"], False)
+
+        asyncio.run(scenario())
+
     def test_inventory_request_to_an_offline_cabinet_is_a_no_op(self) -> None:
         hub = ControlHub()
         self.assertFalse(asyncio.run(hub.request_inventory("nosuchcab")))
 
     def test_heartbeat_sized_just_under_the_cap_is_accepted(self) -> None:
         padding = "have tja_pad\n"
-        body = HEARTBEAT + padding * ((MAX_HEARTBEAT_BYTES - len(HEARTBEAT)) //
-                                      len(padding) - 1)
+        count = (MAX_HEARTBEAT_BYTES - len(HEARTBEAT)) // len(padding) - 1
+        body = HEARTBEAT.replace(
+            "have_count=2\n", padding * count + f"have_count={count + 2}\n"
+        )
         self.assertLess(len(body.encode()), MAX_HEARTBEAT_BYTES)
         socket = run([body])
         self.assertIsNone(socket.closed)
-        self.assertIsNotNone(cabinets.load(CABINET_ID))
+        self.assertEqual(len(cabinets.load(CABINET_ID)["have"]), count + 2)
 
 
 if __name__ == "__main__":

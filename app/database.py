@@ -342,16 +342,22 @@ def scan_health() -> dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
-def record_cabinet_package_state(
+def record_cabinet_package_states(
     cabinet_id: str,
-    song_id: str,
-    installed_revision: str,
-    state: str,
-    error_code: str = "",
+    rows: list[tuple[str, str, str, str]],
 ) -> None:
+    """Upsert a whole `P` frame's package states in one transaction.
+
+    One transaction per row meant one connect + fsync per song: a 900-row
+    slice held the caller for seconds, which is fatal when the caller is the
+    asyncio loop serving every other cabinet's socket.
+    """
+    if not rows:
+        return
     _ensure_initialized()
+    now = int(time.time())
     with transaction() as db:
-        db.execute(
+        db.executemany(
             """
             INSERT INTO cabinet_package_state(
                 cabinet_id, song_id, installed_revision, state,
@@ -363,12 +369,8 @@ def record_cabinet_package_state(
                 error_code=excluded.error_code,
                 updated_at=excluded.updated_at
             """,
-            (
-                cabinet_id,
-                song_id,
-                installed_revision,
-                state,
-                error_code,
-                int(time.time()),
-            ),
+            [
+                (cabinet_id, song_id, revision, state, error_code, now)
+                for song_id, revision, state, error_code in rows
+            ],
         )

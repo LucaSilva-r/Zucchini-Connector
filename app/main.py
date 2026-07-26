@@ -444,8 +444,6 @@ def ui_redirect() -> Response:
     return Response(status_code=307, headers={"Location": "/ui/"})
 
 
-# /api/tjarepo is the legacy mount for sprx builds predating the rename.
 app.include_router(cabinet_api, prefix="/api/connector")
-app.include_router(cabinet_api, prefix="/api/tjarepo")
 app.include_router(ui_api, prefix="/api/ui")
 app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")

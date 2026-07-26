@@ -11,7 +11,7 @@ class RouteBoundaryTests(unittest.TestCase):
             for method in (getattr(route, "methods", None) or ())
         }
 
-        cabinet_prefixes = ("/api/connector", "/api/tjarepo")
+        cabinet_prefixes = ("/api/connector",)
         management_suffixes = (
             "/cabinets",
             "/library/manage",

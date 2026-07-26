@@ -5,10 +5,7 @@ from pathlib import Path
 
 
 def env(name: str, default: str) -> str:
-    # CONNECTOR_* preferred; TJAREPO_* kept as legacy alias.
     value = os.getenv(f"CONNECTOR_{name}")
-    if value is None:
-        value = os.getenv(f"TJAREPO_{name}")
     return default if value is None else value
 
 

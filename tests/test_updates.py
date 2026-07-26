@@ -5,8 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("CONNECTOR_UPDATES_ROOT", tempfile.mkdtemp())
-
 from app import updates
 from app.config import settings
 

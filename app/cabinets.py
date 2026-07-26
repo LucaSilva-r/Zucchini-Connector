@@ -316,15 +316,18 @@ def handle_frame(body: str, inventory: bool) -> str:
     """Apply one cabinet frame from the control socket.
 
     `inventory` is True for a full `H` heartbeat and False for a compact `T`
-    status frame. Both share this grammar; only the heartbeat carries a
-    complete `have` list and the config body, so only it may replace them.
+    status frame or a `P` package-state slice. All three share this grammar;
+    only the heartbeat carries a complete `have` list and the config body, so
+    only it may replace them, and only if `have_count` agrees with the number
+    of `have` lines that actually arrived.
 
-    Lines: id=, serial=, name=, game=, version=, flavor=, seq=,
+    Lines: id=, serial=, name=, game=, version=, flavor=, seq=, have_count=,
     op_seq=, op_phase=, op_done=, op_total=, op_failed=, op_song=,
     op_error=, update_ack=, update_work_id=, update_phase=,
     update_done=, update_total=, update_error=,
     applied=<section.key>=<value> (repeatable), have <song_id> (repeatable,
-    heartbeat only), then a blank line and the raw taiko_config.cfg contents.
+    heartbeat only), pkg <song_id> <revision> <state> [error] (repeatable,
+    `P` frames), then a blank line and the raw taiko_config.cfg contents.
 
     Returns the command text for this cabinet: managed=1, seq=N,
     cfg <section.key>=<value>, sel <song_id>, update <sha1> <size> <version>.
@@ -369,7 +372,20 @@ def handle_frame(body: str, inventory: bool) -> str:
         # A status frame carries no inventory: the cabinet only sends a
         # heartbeat when it has a complete one, so retain the last complete
         # list instead of flashing back to zero mid-operation.
-        if inventory:
+        # `have_count` is the cabinet's own count of the lines it wrote, and
+        # every heartbeat carries one. A missing or mismatched count means the
+        # list was truncated in transit, and a truncated inventory is worse than
+        # a stale one: `have` is authoritative, so everything missing from it is
+        # reported as absent from the cabinet. Keep the previous list instead.
+        declared = fields.get("have_count", "")
+        complete = declared.isdigit() and int(declared) == len(have)
+        if inventory and not complete:
+            print(
+                f"[cabinet {cabinet_id}] inventory rejected: {len(have)} songs "
+                f"arrived, have_count={declared or 'absent'}; keeping the previous list",
+                flush=True,
+            )
+        if inventory and complete:
             cab["have"] = have
             have_set = set(have)
             cab["package_states"] = {
@@ -403,17 +419,14 @@ def handle_frame(body: str, inventory: bool) -> str:
                 cab[key] = max(cab[key], int(fields.get(field, "0")))
             except ValueError:
                 pass
-        for song_id, revision, package_state, error_code in package_states:
-            if not song_id:
-                continue
+        recorded = [row for row in package_states if row[0]]
+        for song_id, revision, package_state, error_code in recorded:
             cab["package_states"][song_id] = {
                 "revision": revision,
                 "state": package_state,
                 "error_code": error_code,
             }
-            database.record_cabinet_package_state(
-                cabinet_id, song_id, revision, package_state, error_code
-            )
+        database.record_cabinet_package_states(cabinet_id, recorded)
 
         if "op_phase" in fields:
             cab["operation_phase"] = fields["op_phase"][:32]

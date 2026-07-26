@@ -41,6 +41,8 @@ MAX_MESSAGE_BYTES = 4096
 # file. The cabinet builds them in a fixed 192 KiB buffer and refuses to send
 # anything larger, so this only has to be a sane ceiling above that.
 MAX_HEARTBEAT_BYTES = 256 * 1024
+# `P\n` package-state slices come out of a 64 KiB cabinet buffer.
+MAX_PACKAGE_BYTES = 96 * 1024
 
 
 def _token_ok(candidate: str) -> bool:
@@ -81,10 +83,17 @@ class ControlHub:
 
     def _remove(
         self, table: dict[str, WebSocket], cabinet_id: str, websocket: WebSocket
-    ) -> None:
+    ) -> bool:
+        """Drop this socket if it is still the registered one.
+
+        Returns False when a newer connection already took the slot — the
+        caller must not then announce the cabinet as offline, because it isn't.
+        """
         with self._lock:
             if table.get(cabinet_id) is websocket:
                 table.pop(cabinet_id, None)
+                return True
+        return False
 
     def _get(self, table: dict[str, WebSocket], cabinet_id: str) -> WebSocket | None:
         with self._lock:
@@ -120,7 +129,9 @@ class ControlHub:
             pass
 
     async def _broadcast_status(self, cabinet_id: str) -> None:
-        cab = cabinets.load(cabinet_id)
+        # Reads and parses the cabinet file, which on a full library is a few
+        # hundred KB of JSON — keep it off the loop thread.
+        cab = await asyncio.to_thread(cabinets.load, cabinet_id)
         if cab is None:
             return
         with self._lock:
@@ -159,15 +170,21 @@ class ControlHub:
                     message = await asyncio.wait_for(
                         websocket.receive_text(), timeout=0.25
                     )
-                    # `H\n` is the full heartbeat (inventory + config); `T\n` is
-                    # compact operation telemetry. Same grammar, same handler,
-                    # different size budget and inventory authority.
+                    # `H\n` is the full heartbeat (inventory + config); `P\n` is
+                    # an advisory per-song package-state slice; `T\n` is compact
+                    # operation telemetry. Same grammar, same handler, different
+                    # size budgets, and only `H` may replace the inventory.
                     is_heartbeat = message.startswith("H\n")
-                    limit = MAX_HEARTBEAT_BYTES if is_heartbeat else MAX_MESSAGE_BYTES
+                    is_packages = message.startswith("P\n")
+                    limit = MAX_MESSAGE_BYTES
+                    if is_heartbeat:
+                        limit = MAX_HEARTBEAT_BYTES
+                    elif is_packages:
+                        limit = MAX_PACKAGE_BYTES
                     if len(message.encode("utf-8")) > limit:
                         await websocket.close(code=1009, reason="Message too large")
                         break
-                    if is_heartbeat or message.startswith("T\n"):
+                    if is_heartbeat or is_packages or message.startswith("T\n"):
                         frame = message[2:]
                         reported_id = next(
                             (
@@ -182,21 +199,33 @@ class ControlHub:
                                 code=1008, reason="Cabinet ID mismatch"
                             )
                             break
-                        cabinets.handle_frame(frame, inventory=is_heartbeat)
+                        # Frame handling writes the cabinet file and a whole
+                        # `P` slice to sqlite. On the loop thread that stalls
+                        # every other cabinet's socket — including the pings
+                        # that keep it alive — so a busy cabinet would knock
+                        # its neighbours offline. Hand it to a worker thread;
+                        # `cabinets` is already lock-guarded.
+                        await asyncio.to_thread(
+                            cabinets.handle_frame, frame, is_heartbeat
+                        )
                         await self._broadcast_status(cabinet_id)
                 except asyncio.TimeoutError:
                     pass
 
-                command = cabinets.command_for(cabinet_id)
+                command = await asyncio.to_thread(cabinets.command_for, cabinet_id)
                 if command != last_command:
                     await websocket.send_text("M\n" + command)
                     last_command = command
         except WebSocketDisconnect:
             pass
         finally:
-            self._remove(self._cabinets, cabinet_id, websocket)
-            await self._operator_status(cabinet_id, False)
-            await self._broadcast_status(cabinet_id)
+            # A cabinet that reconnects registers its new socket before this
+            # one finishes tearing down. Announcing offline unconditionally
+            # here overwrote the new connection's online notice, leaving the
+            # operator view stuck at "Cabinet offline" while frames flowed.
+            if self._remove(self._cabinets, cabinet_id, websocket):
+                await self._operator_status(cabinet_id, False)
+                await self._broadcast_status(cabinet_id)
 
     async def viewer(self, websocket: WebSocket, cabinet_id: str) -> None:
         if not cabinet_id:

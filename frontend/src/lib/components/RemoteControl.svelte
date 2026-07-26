@@ -32,7 +32,11 @@
 
   let socket = $state<WebSocket | null>(null);
   let connected = $state(false);
-  let cabinetOnline = $state(false);
+  // Derived from the dashboard's live cabinet object, which the status stream
+  // refreshes on every frame the cabinet sends. The control socket's one-shot
+  // "cabinet" event only fires on connect and disconnect, so a reconnect could
+  // leave this panel claiming the cabinet was offline indefinitely.
+  const cabinetOnline = $derived(cabinet.control_online);
   let error = $state("");
   let held = $state<Set<ButtonName>>(new Set());
   let seq = 0;
@@ -82,7 +86,6 @@
     ws.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data));
-        if (message.type === "cabinet") cabinetOnline = Boolean(message.online);
         if (message.type === "error") error = String(message.message || "Control error");
       } catch {
         error = "Connector sent an invalid control message";
@@ -94,7 +97,6 @@
     ws.onclose = () => {
       if (socket !== ws) return;
       connected = false;
-      cabinetOnline = false;
       socket = null;
       held = new Set();
       window.clearInterval(heartbeatTimer);

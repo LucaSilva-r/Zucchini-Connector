@@ -29,7 +29,7 @@ COURSE_NAME_BY_ID = {value: key for key, value in COURSE_IDS.items()}
 
 _CONVERSION_POOL = ThreadPoolExecutor(
     max_workers=settings.conversion_workers,
-    thread_name_prefix="tjarepo-convert",
+    thread_name_prefix="connector-convert",
 )
 _CONVERSION_FUTURES: dict[str, Future[None]] = {}
 _CONVERSION_LOCK = RLock()
@@ -152,7 +152,7 @@ def resume_jobs() -> None:
     if _RETRY_THREAD is None or not _RETRY_THREAD.is_alive():
         _RETRY_STOP.clear()
         _RETRY_THREAD = Thread(
-            target=_retry_loop, daemon=True, name="tjarepo-convert-retry"
+            target=_retry_loop, daemon=True, name="connector-convert-retry"
         )
         _RETRY_THREAD.start()
 
@@ -591,7 +591,7 @@ def _convert_package(
                 retryable=False,
             )
         suffix = Path(member).suffix or ".audio"
-        with tempfile.TemporaryDirectory(prefix="tjarepo-osz-audio-") as tmpdir:
+        with tempfile.TemporaryDirectory(prefix="connector-osz-audio-") as tmpdir:
             source = Path(tmpdir) / f"source{suffix}"
             source.write_bytes(
                 osu.read_member(Path(str(entry["osz_path"])), member, osu.MAX_AUDIO_BYTES)
@@ -728,7 +728,7 @@ def _convert_osz_charts(entry: dict[str, Any], tmp: Path) -> tuple[list[dict[str
 def _convert_audio(source: Path, nub: Path, nsh: Path, lead_in_ms: int = 0) -> None:
     if not settings.ps3_at3tool_path.is_file():
         raise RuntimeError(f"ps3_at3tool.exe not found: {settings.ps3_at3tool_path}")
-    with tempfile.TemporaryDirectory(prefix="tjarepo-audio-") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="connector-audio-") as tmpdir:
         tmp = Path(tmpdir)
         wav = tmp / "audio.wav"
         at3 = tmp / "audio.at3"
