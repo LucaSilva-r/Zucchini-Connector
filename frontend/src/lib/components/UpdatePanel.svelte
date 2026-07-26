@@ -137,6 +137,9 @@
         </div>
         <p class="mt-1.5 text-xs text-muted-foreground">{cabinet.update_done.toLocaleString()} / {cabinet.update_total.toLocaleString()} bytes</p>
       {/if}
+      {#if cabinet.update_phase === "complete" || cabinet.update_phase === "installed"}
+        <p class="mt-2 text-sm text-muted-foreground">Installed on the cabinet. It runs the new build the next time the game is launched.</p>
+      {/if}
       {#if cabinet.update_error}<p class="mt-2 text-sm text-destructive">{cabinet.update_error}</p>{/if}
     </div>
   {/if}
@@ -166,7 +169,7 @@
             <Button
               variant="outline"
               size="sm"
-              disabled={busy || cabinet.update_pending !== null || update.flavor !== cabinet.flavor || cabinet.update_installed_id === update.id}
+              disabled={busy || cabinet.update_pending !== null || (!!cabinet.flavor && update.flavor !== cabinet.flavor) || cabinet.update_installed_id === update.id}
               onclick={() => installStored(update)}
             >
               <RotateCcwIcon /> {cabinet.update_installed_id === update.id ? "Installed" : "Install"}

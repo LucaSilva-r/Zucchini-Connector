@@ -1,11 +1,14 @@
 <script lang="ts">
   import Gamepad2Icon from "@lucide/svelte/icons/gamepad-2";
+  import PowerIcon from "@lucide/svelte/icons/power";
   import RadioIcon from "@lucide/svelte/icons/radio";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import { exitCabinetGame } from "$lib/api.js";
   import type { Cabinet } from "$lib/types.js";
 
-  let { cabinet }: { token: string; cabinet: Cabinet } = $props();
+  let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
 
   type ButtonName =
     | "hit_side_left" | "hit_center_left" | "hit_center_right" | "hit_side_right"
@@ -38,6 +41,10 @@
   // leave this panel claiming the cabinet was offline indefinitely.
   const cabinetOnline = $derived(cabinet.control_online);
   let error = $state("");
+  let exitOpen = $state(false);
+  let exiting = $state(false);
+  let exitError = $state("");
+  let exitNotice = $state("");
   let held = $state<Set<ButtonName>>(new Set());
   let seq = 0;
   let reconnectTimer: number | undefined;
@@ -147,6 +154,20 @@
     setHeld(button, false);
   }
 
+  async function closeGame() {
+    exiting = true;
+    exitError = "";
+    try {
+      await exitCabinetGame(token, cabinet.cabinet_id);
+      exitNotice = "Close requested. The cabinet is on XMB — the drum still works there, so relaunch the game with it.";
+      exitOpen = false;
+    } catch (err) {
+      exitError = err instanceof Error ? err.message : String(err);
+    } finally {
+      exiting = false;
+    }
+  }
+
   $effect(() => {
     const id = controlCabinetId;
     stopped = false;
@@ -177,14 +198,38 @@
       <div class="flex items-center gap-2 text-sm font-semibold"><Gamepad2Icon class="size-4" /> Remote cabinet controls</div>
       <p class="mt-1 text-xs text-muted-foreground">Keyboard: D F J K (P1), Z X C V (P2), arrows, Enter, F1 test, F2 service, F3 coin. Controls are released automatically if this page or the cabinet disconnects.</p>
     </div>
-    <div class="flex gap-2">
+    <div class="flex flex-wrap items-center gap-2">
       <Badge variant={connected ? "outline" : "secondary"}><RadioIcon /> {connected ? "Relay connected" : "Connecting"}</Badge>
       <Badge variant={cabinetOnline ? "default" : "secondary"} class={cabinetOnline ? "bg-emerald-600 hover:bg-emerald-600" : ""}>
         {cabinetOnline ? "Cabinet connected" : "Cabinet offline"}
       </Badge>
+      <Button variant="outline" size="sm" class="border-destructive/40 text-destructive hover:bg-destructive/10" disabled={!cabinetOnline || exiting} onclick={() => { exitError = ""; exitOpen = true; }}>
+        <PowerIcon /> Close game
+      </Button>
     </div>
   </div>
 
+  <AlertDialog.Root bind:open={exitOpen}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Close the game on {cabinet.name || cabinet.cabinet_id}?</AlertDialog.Title>
+        <AlertDialog.Description>
+          This ends the running game immediately — any credit or play in progress is lost. The cabinet drops to the PS3 XMB, where it stops
+          answering this connector until the game runs again. The drum still acts as a controller on XMB, so relaunch the game with it from
+          this page's controls. Do this only when you can watch the screen: nothing else can bring the cabinet back.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      {#if exitError}<p class="text-sm text-destructive">{exitError}</p>{/if}
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" disabled={exiting} onclick={closeGame}>
+          {exiting ? "Closing…" : "Close the game"}
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+
+  {#if exitNotice}<p class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">{exitNotice}</p>{/if}
   {#if error}<p class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>{/if}
 
 {#snippet control(name: ButtonName, label: string, extra: string, variant: "outline" | "default" = "outline")}

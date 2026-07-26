@@ -117,9 +117,17 @@ saw). `M\n` carries:
 - **Zucchini updates**: an operator can upload any signed `zucchini.sprx` with
   a version and change note, or select an earlier stored build to roll back a
   cabinet. The Connector rejects a HEN/GEX signing-flavor mismatch and stores
-  artifacts by SHA-1. The cabinet waits for attract, streams the selected file,
-  verifies its header, size, and SHA-1, atomically swaps the runtime plugin,
-  then restarts. Completion is acknowledged after the new plugin boots.
+  artifacts by SHA-1. The cabinet streams the selected file in resumable
+  chunks, verifies its SHA-1, and atomically swaps the runtime plugin, keeping
+  the previous build until the swap succeeds. The running plugin is already
+  mapped in memory, so the swap is safe in any game state and the new build
+  takes effect at the cabinet's next launch (which also re-patches its EBOOT).
+  The acknowledgement is the SHA-1 of the plugin actually on disk, so a build
+  installed by hand reports itself correctly too. A cabinet never restarts
+  itself: the **Close game** button on the Control tab does it on request,
+  behind a confirmation, once an operator is watching. The game exits to XMB,
+  where the drum still works as a controller, so the same remote controls
+  relaunch it — and the relaunch is what applies the new build.
 
 Changes queued while a cabinet is offline persist and are delivered when it
 reconnects. Cabinet liveness is socket presence — there is no HTTP polling and

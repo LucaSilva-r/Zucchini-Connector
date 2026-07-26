@@ -338,6 +338,15 @@ async def cabinet_events(websocket: WebSocket, cabinet_id: str) -> None:
     await control.hub.viewer(websocket, cabinet_id)
 
 
+@ui_api.post("/cabinets/{cabinet_id}/exit", dependencies=[Depends(auth.require_management)])
+async def cabinet_exit(cabinet_id: str) -> dict[str, str]:
+    """Close the game on the cabinet. It lands on XMB, where the drum still
+    works as a controller, so an operator can relaunch it remotely."""
+    if not await control.hub.request_exit(cabinet_id):
+        raise HTTPException(status_code=409, detail="Cabinet is not connected")
+    return {"status": "closing"}
+
+
 @ui_api.delete("/cabinets/{cabinet_id}", dependencies=[Depends(auth.require_management)])
 def cabinet_delete(cabinet_id: str) -> dict[str, str]:
     if not cabinets.delete(cabinet_id):

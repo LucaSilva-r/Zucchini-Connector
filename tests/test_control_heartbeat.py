@@ -236,6 +236,28 @@ class ControlHeartbeatTests(unittest.TestCase):
         hub = ControlHub()
         self.assertFalse(asyncio.run(hub.request_inventory("nosuchcab")))
 
+    def test_exit_request_is_sent_to_a_connected_cabinet(self) -> None:
+        """`X\\n` is what the cabinet matches on to close the game."""
+        hub = ControlHub()
+        socket = StubSocket([HEARTBEAT], hold=True)
+
+        async def scenario() -> None:
+            task = asyncio.ensure_future(hub.cabinet(socket, CABINET_ID))
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if hub.status(CABINET_ID)["control_online"]:
+                    break
+            self.assertTrue(await hub.request_exit(CABINET_ID))
+            socket.release()
+            await task
+
+        asyncio.run(scenario())
+        self.assertIn("X\n", socket.sent)
+
+    def test_exit_request_to_an_offline_cabinet_is_a_no_op(self) -> None:
+        hub = ControlHub()
+        self.assertFalse(asyncio.run(hub.request_exit("nosuchcab")))
+
     def test_heartbeat_sized_just_under_the_cap_is_accepted(self) -> None:
         padding = "have tja_pad\n"
         count = (MAX_HEARTBEAT_BYTES - len(HEARTBEAT)) // len(padding) - 1

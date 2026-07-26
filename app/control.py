@@ -119,6 +119,24 @@ class ControlHub:
             self._remove(self._cabinets, cabinet_id, cabinet)
             return False
 
+    async def request_exit(self, cabinet_id: str) -> bool:
+        """Ask a cabinet to close the game.
+
+        A PS3 title exits to XMB, but the drum is a DualShock, so an operator
+        holding the remote controls can walk the cabinet back into the game
+        from there. That round trip is what applies a downloaded plugin update
+        — it is only read at launch — without a site visit.
+        """
+        cabinet = self._get(self._cabinets, cabinet_id)
+        if cabinet is None:
+            return False
+        try:
+            await cabinet.send_text("X\n")
+            return True
+        except RuntimeError:
+            self._remove(self._cabinets, cabinet_id, cabinet)
+            return False
+
     async def _operator_status(self, cabinet_id: str, online: bool) -> None:
         operator = self._get(self._operators, cabinet_id)
         if operator is None:
