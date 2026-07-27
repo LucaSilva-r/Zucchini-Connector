@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import UploadFile
 
-from . import cabinets, catalog, converter, osu
+from . import catalog, converter, osu
 from .config import settings
 
 
@@ -131,7 +131,6 @@ def delete_song(song_id: str) -> dict[str, str]:
         raise FileNotFoundError("Song not found")
     _delete_song_files(song_id, entry)
     catalog.refresh_after_mutation()
-    cabinets.remove_songs_everywhere({song_id})
     return {"status": "deleted", "song_id": song_id}
 
 
@@ -149,7 +148,6 @@ def delete_songs(song_ids: list[str]) -> dict[str, Any]:
         deleted.append(song_id)
     if deleted:
         catalog.refresh_after_mutation()
-        cabinets.remove_songs_everywhere(set(deleted))
     return {"status": "deleted", "deleted": deleted, "missing": missing}
 
 

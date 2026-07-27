@@ -126,6 +126,49 @@ class CabinetPollTests(unittest.TestCase):
         self.assertIn("seq=2", response)
         self.assertIn("sel tja_y2", response)
 
+    def test_removed_song_reconciles_synced_selection(self) -> None:
+        heartbeat(POLL)
+        cabinets.set_selection("ab12cd34", ["tja_x1", "tja_y2"])
+        heartbeat(
+            POLL.replace(
+                "seq=0\n",
+                "seq=0\ndesired_ack=1\nactive_seq=1\n"
+                "pkg tja_y2 deadbeef blocked unavailable\n",
+            )
+        )
+
+        changed = cabinets.remove_songs_everywhere({"tja_y2"})
+
+        self.assertEqual(changed, 1)
+        cab = cabinets.load("ab12cd34")
+        self.assertEqual(cab["selection"], ["tja_x1"])
+        self.assertIsNone(cab["queued_selection"])
+        self.assertEqual(cab["selection_seq"], 2)
+        self.assertNotIn("tja_y2", cab["package_states"])
+
+    def test_removed_song_queues_behind_active_selection(self) -> None:
+        heartbeat(POLL)
+        cabinets.set_selection("ab12cd34", ["tja_x1", "tja_y2"])
+
+        cabinets.remove_songs_everywhere({"tja_y2"})
+
+        cab = cabinets.load("ab12cd34")
+        self.assertEqual(cab["selection"], ["tja_x1", "tja_y2"])
+        self.assertEqual(cab["queued_selection"], ["tja_x1"])
+        self.assertEqual(cab["selection_seq"], 1)
+
+    def test_library_reconciliation_removes_unknown_desired_songs(self) -> None:
+        heartbeat(POLL)
+        cabinets.set_selection("ab12cd34", ["tja_x1", "tja_missing"])
+        heartbeat(POLL.replace("seq=0\n", "seq=0\ndesired_ack=1\nactive_seq=1\n"))
+
+        changed = cabinets.remove_unavailable_songs({"tja_x1"})
+
+        self.assertEqual(changed, 1)
+        cab = cabinets.load("ab12cd34")
+        self.assertEqual(cab["selection"], ["tja_x1"])
+        self.assertEqual(cab["selection_seq"], 2)
+
     def test_resync_bumps_verify_generation(self) -> None:
         heartbeat(POLL)
         cabinets.set_selection("ab12cd34", ["tja_x1"])

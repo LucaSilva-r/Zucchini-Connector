@@ -170,20 +170,40 @@ def remove_songs_everywhere(song_ids: set[str]) -> int:
             if desired is None:
                 desired = cab["selection"]
             cleaned = [sid for sid in desired if sid not in song_ids]
-            if cleaned == desired:
+            stale_package_ids = song_ids.intersection(cab["package_states"])
+            if cleaned == desired and not stale_package_ids:
                 continue
-            if cab["selection_seq"] > cab["acked_seq"]:
+            if cleaned != desired and cab["selection_seq"] > cab["desired_ack"]:
                 cab["queued_selection"] = (
                     None if cleaned == cab["selection"] else cleaned
                 )
-            else:
+            elif cleaned != desired:
                 cab["selection"] = cleaned
                 cab["queued_selection"] = None
                 if cab["managed"]:
                     cab["selection_seq"] += 1
+            for song_id in stale_package_ids:
+                cab["package_states"].pop(song_id, None)
             _save(cab)
             changed += 1
     return changed
+
+
+def remove_unavailable_songs(available_song_ids: set[str]) -> int:
+    """Repair cabinet desired state after a successful library scan."""
+    selected_song_ids: set[str] = set()
+    with _lock:
+        if not settings.cabinets_root.is_dir():
+            return 0
+        for path in settings.cabinets_root.glob("*.json"):
+            try:
+                cab = {**_DEFAULT, **json.loads(path.read_text())}
+            except (OSError, ValueError):
+                continue
+            selected_song_ids.update(cab["selection"])
+            selected_song_ids.update(cab["queued_selection"] or [])
+            selected_song_ids.update(cab["package_states"])
+    return remove_songs_everywhere(selected_song_ids - available_song_ids)
 
 
 def set_config(cabinet_id: str, kv: dict[str, str]) -> dict | None:

@@ -168,6 +168,13 @@ def refresh_library() -> dict[str, Any]:
         _LIBRARY_CACHE = built
         _LIBRARY_AT = time.monotonic()
         database.finish_scan(generation, built["songs"])
+        # A scan is the authoritative library boundary, including scans caused
+        # by external filesystem changes. Repair desired cabinet state here
+        # instead of relying only on the management delete endpoints.
+        from . import cabinets
+        cabinets.remove_unavailable_songs(
+            {str(song["id"]) for song in built["songs"]}
+        )
         return built
 
 
