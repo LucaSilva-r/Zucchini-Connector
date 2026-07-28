@@ -15,7 +15,7 @@ from threading import Lock
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import auth, cabinets
+from . import agents, auth, cabinets
 from .config import settings
 
 
@@ -65,8 +65,17 @@ class ControlHub:
             }
 
     def decorate(self, cabinet: dict) -> dict:
+        """Merge live, non-persisted state onto a stored cabinet record.
+
+        Agent presence rides along here so every endpoint and the status
+        broadcast report it without each having to know about the agent hub.
+        """
         cabinet_id = str(cabinet.get("cabinet_id") or "")
-        return {**cabinet, **self.status(cabinet_id)}
+        return {
+            **cabinet,
+            **self.status(cabinet_id),
+            **agents.hub.status(cabinet_id),
+        }
 
     async def _replace(
         self, table: dict[str, WebSocket], cabinet_id: str, websocket: WebSocket
@@ -132,6 +141,23 @@ class ControlHub:
             return False
         try:
             await cabinet.send_text("X\n")
+            return True
+        except RuntimeError:
+            self._remove(self._cabinets, cabinet_id, cabinet)
+            return False
+
+    async def request_screenshot(self, cabinet_id: str) -> bool:
+        """Ask the plugin to grab the current frame.
+
+        This is the in-game route: webMAN refuses to capture while a game
+        runs, but the plugin is inside that game and already draws overlays
+        into the very surface being scanned out.
+        """
+        cabinet = self._get(self._cabinets, cabinet_id)
+        if cabinet is None:
+            return False
+        try:
+            await cabinet.send_text("G\n")
             return True
         except RuntimeError:
             self._remove(self._cabinets, cabinet_id, cabinet)

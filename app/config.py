@@ -67,6 +67,35 @@ class Settings:
         self.management_session_seconds = max(
             300, int(env("MANAGEMENT_SESSION_SECONDS", str(8 * 60 * 60)))
         )
+        # Plain-HTTP listener for webMAN agents. webMAN has no TLS stack, so
+        # this cannot be the HTTPS port; it serves only the agent poll route
+        # and is meant for the arcade LAN. 0 disables it.
+        self.agent_port = int(env("AGENT_PORT", "8080"))
+        # Deliberately NOT api_token: that one is the TaikOnline card-issuer
+        # credential, and the agent channel is cleartext and its token ends up
+        # in a file on the cabinet's disk. A compromised agent token can
+        # reboot consoles; it must not also mint cards. Generated once and
+        # kept in storage so a fresh install needs no configuration.
+        self.agent_token = env("AGENT_TOKEN", "") or self._persistent_agent_token()
+
+    def _persistent_agent_token(self) -> str:
+        import secrets
+
+        path = self.cabinets_root.parent / "agent_token"
+        try:
+            token = path.read_text().strip()
+            if token:
+                return token
+        except OSError:
+            pass
+        token = secrets.token_hex(16)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(token)
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return token
 
 
 settings = Settings()

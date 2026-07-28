@@ -2,10 +2,11 @@
   import Gamepad2Icon from "@lucide/svelte/icons/gamepad-2";
   import PowerIcon from "@lucide/svelte/icons/power";
   import RadioIcon from "@lucide/svelte/icons/radio";
+  import CameraIcon from "@lucide/svelte/icons/camera";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
-  import { exitCabinetGame } from "$lib/api.js";
+  import { exitCabinetGame, requestScreenshot, runWebmanAction, type WebmanAction } from "$lib/api.js";
   import type { Cabinet } from "$lib/types.js";
 
   let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
@@ -154,6 +155,90 @@
     setHeld(button, false);
   }
 
+  // webMAN runs on the console itself, so these keep working after the game
+  // process is gone — which is the point of restart_game.
+  const WEBMAN_LABELS: Record<WebmanAction, { label: string; confirm: string }> = {
+    restart_game: {
+      label: "Restart game",
+      confirm:
+        "Closes the game, waits for XMB and presses X on the game icon to launch it again. Any credit or play in progress is lost. This is how a downloaded plugin update gets applied without a site visit.",
+    },
+    exit_game: {
+      label: "Exit to XMB",
+      confirm:
+        "Closes the game and leaves the cabinet on XMB. It stops answering this connector until the game runs again.",
+    },
+    reboot: {
+      label: "Reboot console",
+      confirm:
+        "Soft-reboots the PS3. The cabinet is offline until it boots and the game auto-starts.",
+    },
+  };
+  // Delivered by the webMAN agent in VSH, which is up even with no game
+  // running. The plugin has no part in it: a game process cannot reach its own
+  // console.
+  const webmanReady = $derived(cabinet.agent_online);
+  // Either half can capture: the plugin while the game runs, webMAN once it
+  // has exited. Between them there is no state that cannot be seen.
+  const canCapture = $derived(cabinet.agent_online || cabinet.control_online);
+  let webmanPending = $state<WebmanAction | null>(null);
+  let webmanBusy = $state(false);
+  let webmanError = $state("");
+  let webmanNotice = $state("");
+  let consoleOpen = $state(false);
+  let shotBusy = $state(false);
+  let shotError = $state("");
+  // Cache-busting stamp: the screenshot URL is fixed per cabinet, so the
+  // browser would otherwise show the previous capture forever.
+  let shotStamp = $state(0);
+  const shotUrl = $derived(
+    shotStamp ? `/api/ui/cabinets/${encodeURIComponent(cabinet.cabinet_id)}/screenshot?t=${shotStamp}` : "",
+  );
+
+  async function takeScreenshot() {
+    shotBusy = true;
+    shotError = "";
+    try {
+      await requestScreenshot(token, cabinet.cabinet_id);
+      // The console captures and uploads after answering, so poll the image
+      // rather than guessing a delay.
+      for (let attempt = 0; attempt < 15; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const stamp = Date.now();
+        const probe = await fetch(
+          `/api/ui/cabinets/${encodeURIComponent(cabinet.cabinet_id)}/screenshot?t=${stamp}`,
+          { credentials: "include" },
+        );
+        if (probe.ok) {
+          const captured = Number(probe.headers.get("X-Captured-At") ?? 0);
+          if (captured * 1000 > stamp - 60000) {
+            shotStamp = stamp;
+            return;
+          }
+        }
+      }
+      shotError = "No screenshot arrived. In-game capture needs the cabinet's control socket; on XMB it needs the webMAN agent.";
+    } catch (err) {
+      shotError = err instanceof Error ? err.message : String(err);
+    } finally {
+      shotBusy = false;
+    }
+  }
+
+  async function runWebman(action: WebmanAction) {
+    webmanBusy = true;
+    webmanError = "";
+    try {
+      await runWebmanAction(token, cabinet.cabinet_id, action);
+      webmanNotice = `${WEBMAN_LABELS[action].label} sent to the console.`;
+      webmanPending = null;
+    } catch (err) {
+      webmanError = err instanceof Error ? err.message : String(err);
+    } finally {
+      webmanBusy = false;
+    }
+  }
+
   async function closeGame() {
     exiting = true;
     exitError = "";
@@ -203,6 +288,12 @@
       <Badge variant={cabinetOnline ? "default" : "secondary"} class={cabinetOnline ? "bg-emerald-600 hover:bg-emerald-600" : ""}>
         {cabinetOnline ? "Cabinet connected" : "Cabinet offline"}
       </Badge>
+      {#if cabinet.agent_online}
+        <Badge variant="outline">Console {cabinet.agent_state === "game" ? "in game" : "on XMB"}</Badge>
+      {/if}
+      <Button variant="outline" size="sm" disabled={!canCapture || shotBusy} onclick={takeScreenshot}>
+        <CameraIcon /> {shotBusy ? "Capturing…" : "Screenshot"}
+      </Button>
       <Button variant="outline" size="sm" class="border-destructive/40 text-destructive hover:bg-destructive/10" disabled={!cabinetOnline || exiting} onclick={() => { exitError = ""; exitOpen = true; }}>
         <PowerIcon /> Close game
       </Button>
@@ -229,6 +320,75 @@
     </AlertDialog.Content>
   </AlertDialog.Root>
 
+  <!-- Only for cabinets that have actually had an agent. An RPCS3 instance or a
+       console without the VSH plugin can never run these, so it is not offered
+       buttons that would always fail. Sticky once seen, so the panel does not
+       vanish while the agent is merely offline. -->
+  {#if cabinet.agent_ever}
+  <details bind:open={consoleOpen} class="rounded-lg border border-destructive/40 bg-destructive/5">
+    <summary class="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
+      Console control (webMAN) — dangerous
+    </summary>
+    <div class="grid gap-3 border-t border-destructive/30 p-3">
+      <p class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <strong>These act on the PS3 itself, not on the game.</strong> They end any credit or play in progress immediately, and a cabinet
+        that fails to come back needs someone physically at the machine. Use them when you can watch the result, not blind.
+      </p>
+      <p class="text-xs text-muted-foreground">
+        {#if cabinet.agent_online}
+          webMAN agent connected ({cabinet.agent_state === "game" ? "in game" : "on XMB"}). These keep working when the game is closed, which is
+          what makes an unattended plugin update possible.
+        {:else}
+          Agent offline — the console is powered down, or the VSH plugin is not running. These will fail until it polls again.
+        {/if}
+      </p>
+
+      <div class="flex flex-wrap items-center gap-2">
+        {#each Object.keys(WEBMAN_LABELS) as action (action)}
+          <Button
+            variant="outline"
+            size="sm"
+            class="border-destructive/40 text-destructive hover:bg-destructive/10"
+            disabled={(!cabinetOnline && !cabinet.agent_online) || !webmanReady || webmanBusy}
+            onclick={() => { webmanError = ""; webmanPending = action as WebmanAction; }}
+          >
+            {WEBMAN_LABELS[action as WebmanAction].label}
+          </Button>
+        {/each}
+      </div>
+    </div>
+  </details>
+  {/if}
+
+  <AlertDialog.Root open={webmanPending !== null} onOpenChange={(open) => { if (!open) webmanPending = null; }}>
+    <AlertDialog.Content>
+      {#if webmanPending}
+        <AlertDialog.Header>
+          <AlertDialog.Title>{WEBMAN_LABELS[webmanPending].label} on {cabinet.name || cabinet.cabinet_id}?</AlertDialog.Title>
+          <AlertDialog.Description>{WEBMAN_LABELS[webmanPending].confirm}</AlertDialog.Description>
+        </AlertDialog.Header>
+        {#if webmanError}<p class="text-sm text-destructive">{webmanError}</p>{/if}
+        <AlertDialog.Footer>
+          <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+          <AlertDialog.Action variant="destructive" disabled={webmanBusy} onclick={() => runWebman(webmanPending!)}>
+            {webmanBusy ? "Sending…" : "Run it"}
+          </AlertDialog.Action>
+        </AlertDialog.Footer>
+      {/if}
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+
+  {#if shotError}<p class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{shotError}</p>{/if}
+  {#if shotUrl}
+    <div class="grid gap-1">
+      <img src={shotUrl} alt="Console screen" class="w-full max-w-2xl rounded-md border" />
+      <p class="text-xs text-muted-foreground">
+        Captured by the plugin while the game runs, or by the webMAN agent on XMB — whichever is up.
+      </p>
+    </div>
+  {/if}
+
+  {#if webmanNotice}<p class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">{webmanNotice}</p>{/if}
   {#if exitNotice}<p class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">{exitNotice}</p>{/if}
   {#if error}<p class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>{/if}
 

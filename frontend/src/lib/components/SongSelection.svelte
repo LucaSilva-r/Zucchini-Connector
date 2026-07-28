@@ -150,6 +150,13 @@
   </div>
 
   {#if error}<p class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>{/if}
+  {#if cabinet.game && !cabinet.song_inject}
+    <p class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
+      <CircleAlertIcon class="mr-1 inline size-4 align-text-bottom" />
+      This cabinet runs {cabinet.game_name || cabinet.game}, where custom song injection is not supported. Songs you select are still
+      downloaded and installed, but they will not appear in song select. Only Blue and Green builds show them today.
+    </p>
+  {/if}
   {#if cabinet.queued_selection !== null}
     <p class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
       This edit is queued. The cabinet will start it automatically after selection seq {cabinet.selection_seq} finishes.

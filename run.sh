@@ -180,6 +180,13 @@ fi
 
 check_firewall
 echo "[run] web UI: https://localhost:$port/ui"
+# The webMAN agent listener is started by the app itself, on its own plain
+# port, because webMAN has no TLS stack. The firewall check above only covers
+# the HTTPS port, so say it out loud rather than let cabinets fail silently.
+agent_port="${CONNECTOR_AGENT_PORT:-8080}"
+if [ "$agent_port" != "0" ]; then
+    echo "[run] webMAN agent port: TCP $agent_port must be reachable from the cabinets"
+fi
 # tja2fumen is vendored inside app/ and imported as a top-level module.
 export PYTHONPATH="$PWD/app${PYTHONPATH:+:$PYTHONPATH}"
 # Cabinets treat 60 s of inbound silence on the control socket as a dead link

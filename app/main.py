@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 from threading import Thread
 
@@ -7,12 +9,15 @@ from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, Header, HTTPE
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, cabinets, catalog, control, converter, database, library_admin, updates
+from . import agents, auth, cabinets, catalog, control, converter, database, library_admin, updates
 from .config import settings
 
 app = FastAPI(title="zucchini-connector")
 cabinet_api = APIRouter()
 ui_api = APIRouter()
+# Served on both listeners: over HTTPS for completeness, and over the plain
+# agent port because webMAN has no TLS.
+agent_api = APIRouter()
 
 
 @app.on_event("startup")
@@ -33,6 +38,7 @@ def startup() -> None:
     Thread(target=catalog.refresh_library, daemon=True, name="connector-warm").start()
     catalog.start_library_watch()
     converter.resume_jobs()
+    start_agent_listener()
 
 
 @app.on_event("shutdown")
@@ -45,6 +51,145 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
         return
     if authorization != f"Bearer {settings.api_token}":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+
+def require_agent_token(
+    request: Request, authorization: str | None = Header(default=None)
+) -> None:
+    """Auth for the agent channel only.
+
+    Separate from require_token on purpose: this credential travels in clear
+    on the LAN and is written to a file on every cabinet, so it must not be
+    the TaikOnline card-issuer token that guards the catalog. An empty
+    AGENT_TOKEN disables the check, matching require_token.
+
+    Rejections are logged: a console whose token is stale polls forever and
+    silently, which reads exactly like an agent that was never installed.
+    """
+    if not settings.agent_token:
+        return
+    if authorization != f"Bearer {settings.agent_token}":
+        client = request.client.host if request.client else "unknown"
+        sent = (authorization or "").removeprefix("Bearer ")
+        print(
+            f"[connector] agent poll REJECTED from {client} "
+            f"id={request.query_params.get('id', '')!r} "
+            f"token={sent[:8] + '…' if sent else '(none)'}",
+            flush=True,
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+
+@agent_api.get("/poll", dependencies=[Depends(require_agent_token)])
+async def agent_poll(id: str = "", state: str = "") -> Response:
+    """Long-poll for webMAN commands. Body is one command path per line.
+
+    Plain text because the client is C inside webMAN with no JSON parser, and
+    held open so an idle cabinet costs one request every POLL_HOLD_SECONDS
+    rather than a busy loop.
+    """
+    if not id:
+        raise HTTPException(status_code=400, detail="Cabinet id required")
+    agents.hub.note_seen(id, state)
+    await asyncio.to_thread(cabinets.mark_agent_seen, id)
+    commands = await agents.hub.wait(id)
+    return Response(
+        "".join(f"{command}\n" for command in commands), media_type="text/plain"
+    )
+
+
+# Screenshots are XMB-only: webMAN's saveBMP() pauses the RSX FIFO and refuses
+# to run in-game. Half-resolution 24-bit BMP, so ~430 KB; the ceiling is a
+# sanity bound against a runaway agent, not a real limit.
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+UPLOAD_KINDS = {"screenshot": "screenshot.bmp"}
+
+
+def _upload_path(cabinet_id: str, kind: str) -> Path:
+    safe = "".join(c for c in cabinet_id if c.isalnum() or c in "-_")
+    return settings.cabinets_root / "uploads" / safe / UPLOAD_KINDS[kind]
+
+
+@agent_api.post("/upload", dependencies=[Depends(require_agent_token)])
+async def agent_upload(request: Request, id: str = "", kind: str = "") -> dict[str, object]:
+    """Receive a file the agent captured on the console.
+
+    Written to a temp file and renamed, so a half-finished upload never
+    replaces the last good screenshot an operator is looking at.
+    """
+    if not id or kind not in UPLOAD_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown upload")
+    body = await request.body()
+    if not body or len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Bad upload size")
+    path = _upload_path(id, kind)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    await asyncio.to_thread(tmp.write_bytes, body)
+    await asyncio.to_thread(os.replace, tmp, path)
+    print(f"[connector] agent upload: {id} {kind} {len(body)} bytes", flush=True)
+    return {"status": "stored", "bytes": len(body)}
+
+
+@cabinet_api.post("/cabinet/screenshot", dependencies=[Depends(require_token)])
+async def cabinet_screenshot_upload(request: Request, id: str = "") -> dict[str, object]:
+    """In-game capture, uploaded by the plugin over its own TLS socket."""
+    return await agent_upload(request, id=id, kind="screenshot")
+
+
+@ui_api.post("/cabinets/{cabinet_id}/screenshot", dependencies=[Depends(auth.require_management)])
+async def cabinet_screenshot_request(cabinet_id: str) -> dict[str, str]:
+    """Capture the cabinet's screen, from whichever half can actually do it.
+
+    The plugin can grab a running game but dies with it; webMAN survives the
+    game but refuses to capture while one runs. Between them every state is
+    covered, so prefer the plugin when the game is up and fall back to the
+    agent otherwise — the operator just presses one button.
+    """
+    if await control.hub.request_screenshot(cabinet_id):
+        return {"status": "requested", "route": "plugin"}
+    if agents.hub.enqueue(cabinet_id, "screenshot"):
+        return {"status": "requested", "route": "agent"}
+    raise HTTPException(
+        status_code=409, detail="Neither the game nor a webMAN agent is reachable"
+    )
+
+
+@ui_api.get("/cabinets/{cabinet_id}/screenshot", dependencies=[Depends(auth.require_management)])
+def cabinet_screenshot(cabinet_id: str) -> Response:
+    path = _upload_path(cabinet_id, "screenshot")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No screenshot captured yet")
+    return Response(
+        path.read_bytes(),
+        media_type="image/bmp",
+        headers={"Cache-Control": "no-store", "X-Captured-At": str(int(path.stat().st_mtime))},
+    )
+
+
+def start_agent_listener() -> None:
+    """Serve the agent route over plain HTTP on its own port.
+
+    A separate app, not the main one: everything else here — the management UI,
+    its cookies, the catalog — must not become reachable without TLS just
+    because the agents cannot speak it.
+    """
+    if not settings.agent_port:
+        return
+    import uvicorn
+
+    agent_app = FastAPI(title="zucchini-connector-agents")
+    agent_app.include_router(agent_api, prefix="/api/agent")
+    server = uvicorn.Server(
+        uvicorn.Config(
+            agent_app, host="0.0.0.0", port=settings.agent_port, log_level="warning"
+        )
+    )
+    # uvicorn installs signal handlers only on the main thread; this one is a
+    # daemon and dies with the process.
+    server.install_signal_handlers = lambda: None
+    Thread(target=server.run, daemon=True, name="connector-agents").start()
+    print(f"[connector] webMAN agent listener on :{settings.agent_port}", flush=True)
 
 
 @app.get("/health")
@@ -347,6 +492,42 @@ async def cabinet_exit(cabinet_id: str) -> dict[str, str]:
     return {"status": "closing"}
 
 
+# Fixed webMAN command chains. The browser picks an action name, never a path:
+# whatever is sent here is executed verbatim by the CFW on the console.
+# `restart_game` is the unattended plugin-update round trip — XMB leaves the
+# cursor on the title that was just closed, so one X press relaunches it, and
+# the new SPRX is read at launch.
+# No shutdown action on purpose: nothing here can power a console back on, so
+# a misclick means someone drives to the cabinet. Reboot covers every case
+# shutdown would have.
+WEBMAN_ACTIONS = {
+    "restart_game": "/xmb.ps3$exit;/wait.ps3?xmb;/wait.ps3?5;/pad.ps3?cross",
+    "exit_game": "/xmb.ps3$exit",
+    "reboot": "/reboot.ps3?soft",
+}
+
+
+@ui_api.post("/cabinets/{cabinet_id}/webman", dependencies=[Depends(auth.require_management)])
+async def cabinet_webman(cabinet_id: str, action: str = Body(embed=True)) -> dict[str, str]:
+    """Run one preset webMAN command on the cabinet's console.
+
+    Delivered by the webMAN agent, which lives in VSH and is therefore up even
+    with no game running. The Zucchini plugin has no part in this: a PS3 game
+    process cannot reach its own console, and the relay that tried crashed it.
+    """
+    path = WEBMAN_ACTIONS.get(action)
+    if path is None:
+        raise HTTPException(status_code=400, detail="Unknown webMAN action")
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if not agents.hub.enqueue(cabinet_id, path):
+        raise HTTPException(
+            status_code=409,
+            detail="No webMAN agent is connected for this cabinet",
+        )
+    return {"status": "sent", "action": action, "route": "agent"}
+
+
 @ui_api.delete("/cabinets/{cabinet_id}", dependencies=[Depends(auth.require_management)])
 def cabinet_delete(cabinet_id: str) -> dict[str, str]:
     if not cabinets.delete(cabinet_id):
@@ -453,6 +634,7 @@ def ui_redirect() -> Response:
     return Response(status_code=307, headers={"Location": "/ui/"})
 
 
+app.include_router(agent_api, prefix="/api/agent")
 app.include_router(cabinet_api, prefix="/api/connector")
 app.include_router(ui_api, prefix="/api/ui")
 app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")

@@ -7,6 +7,7 @@ writer; see handle_frame().
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
@@ -18,16 +19,29 @@ from . import database
 
 _lock = Lock()
 
-# PARAM.SFO title-bracket code -> operator-friendly variant name.
-# Codes documented in TaikoZucchini core/game_version.h; unmapped codes
-# are shown raw in the UI — extend as cabinets report them.
+# Build code -> operator-friendly variant name, keyed by the series part only.
+# A code is <prefix><series><variant> ("ST87" = series ST8, variant 7; "S111" =
+# series S11, variant 1) and one game ships under several variants, so the
+# trailing digit is dropped before the lookup. Series numbers follow the arcade
+# release order, which is what this table used to get wrong: ST7 is White, not
+# Sorairo, and S10 is Blue, not Yellow. Unmapped codes are shown raw.
 GAME_NAMES = {
-    "S111": "Green",
-    "S101": "Yellow",
-    "ST91": "White",
-    "ST87": "Red",
-    "ST71": "Sorairo",
+    "ST2": "Katsu-don",
+    "ST3": "Sorairo",
+    "ST4": "Momoiro",
+    "ST5": "Kimidori",
+    "ST6": "Murasaki",
+    "ST7": "White",
+    "ST8": "Red",
+    "ST9": "Yellow",
+    "S10": "Blue",
+    "S11": "Green",
 }
+
+
+def game_name(code: str) -> str:
+    """Operator-facing name for a reported build code, or the code itself."""
+    return GAME_NAMES.get(code[:-1], code) if code else ""
 
 _DEFAULT = {
     "cabinet_id": "",
@@ -35,8 +49,23 @@ _DEFAULT = {
     "name": "",
     "game": "",
     "game_name": "",
+    "build": "",
     "version": "",
     "flavor": "",
+    # Whether this build's song-select injection sites were resolved on the
+    # cabinet. Reported by the plugin, not inferred from the build name: it is
+    # the plugin that knows whether custom songs will actually show up.
+    "song_inject": False,
+    # taiko_config.cfg schema version the cabinet reports. The webMAN agent
+    # needs keys that only exist from v22, and a cabinet below that cannot be
+    # provisioned at all — worth showing rather than leaving the agent to idle
+    # silently forever.
+    "config_version": 0,
+    # Sticky: set the first time a webMAN agent polls for this cabinet. The
+    # console-control UI keys off it, so a cabinet that has never had an agent
+    # (an RPCS3 instance, say) is not shown buttons that cannot work — and one
+    # that has keeps them while the agent is merely offline.
+    "agent_ever": False,
     "last_seen": 0,
     "have": [],
     "reported_cfg": "",
@@ -74,6 +103,17 @@ _DEFAULT = {
 }
 
 
+def _defaults() -> dict:
+    """A private copy of the defaults.
+
+    _DEFAULT holds nested mutables (config_pending, have, package_states).
+    Spreading it shares those objects between every cabinet that omits the
+    key, so one cabinet's queued config would appear on the next cabinet
+    created in the same process.
+    """
+    return copy.deepcopy(_DEFAULT)
+
+
 def _path(cabinet_id: str) -> Path:
     safe = "".join(c for c in cabinet_id if c.isalnum() or c in "-_")
     return settings.cabinets_root / f"{safe}.json"
@@ -81,7 +121,7 @@ def _path(cabinet_id: str) -> Path:
 
 def load(cabinet_id: str) -> dict | None:
     try:
-        return {**_DEFAULT, **json.loads(_path(cabinet_id).read_text())}
+        return {**_defaults(), **json.loads(_path(cabinet_id).read_text())}
     except (OSError, ValueError):
         return None
 
@@ -100,7 +140,7 @@ def list_all() -> list[dict]:
         if settings.cabinets_root.is_dir():
             for p in sorted(settings.cabinets_root.glob("*.json")):
                 try:
-                    out.append({**_DEFAULT, **json.loads(p.read_text())})
+                    out.append({**_defaults(), **json.loads(p.read_text())})
                 except (OSError, ValueError):
                     continue
         return out
@@ -136,6 +176,21 @@ def set_selection(cabinet_id: str, song_ids: list[str]) -> dict | None:
         return cab
 
 
+def mark_agent_seen(cabinet_id: str) -> None:
+    """Record that a webMAN agent exists for this cabinet, once.
+
+    Called from the agent poll, which repeats every ~25 s, so it writes only on
+    the transition. A cabinet the connector has never heard of is skipped: the
+    record appears when the plugin first heartbeats.
+    """
+    with _lock:
+        cab = load(cabinet_id)
+        if cab is None or cab["agent_ever"]:
+            return
+        cab["agent_ever"] = True
+        _save(cab)
+
+
 def force_resync(cabinet_id: str) -> dict | None:
     """Bump the selection sequence without changing the selection, so the
     cabinet re-runs its sync job (re-verifies and fetches anything missing)."""
@@ -163,7 +218,7 @@ def remove_songs_everywhere(song_ids: set[str]) -> int:
             return 0
         for path in sorted(settings.cabinets_root.glob("*.json")):
             try:
-                cab = {**_DEFAULT, **json.loads(path.read_text())}
+                cab = {**_defaults(), **json.loads(path.read_text())}
             except (OSError, ValueError):
                 continue
             desired = cab["queued_selection"]
@@ -197,7 +252,7 @@ def remove_unavailable_songs(available_song_ids: set[str]) -> int:
             return 0
         for path in settings.cabinets_root.glob("*.json"):
             try:
-                cab = {**_DEFAULT, **json.loads(path.read_text())}
+                cab = {**_defaults(), **json.loads(path.read_text())}
             except (OSError, ValueError):
                 continue
             selected_song_ids.update(cab["selection"])
@@ -341,7 +396,8 @@ def handle_frame(body: str, inventory: bool) -> str:
     only it may replace them, and only if `have_count` agrees with the number
     of `have` lines that actually arrived.
 
-    Lines: id=, serial=, name=, game=, version=, flavor=, seq=, have_count=,
+    Lines: id=, serial=, name=, game=, build=, version=, flavor=,
+    song_inject=, seq=, have_count=,
     op_seq=, op_phase=, op_done=, op_total=, op_failed=, op_song=,
     op_error=, update_ack=, update_work_id=, update_phase=,
     update_done=, update_total=, update_error=,
@@ -381,11 +437,15 @@ def handle_frame(body: str, inventory: bool) -> str:
         return "error=missing id\n"
 
     with _lock:
-        cab = load(cabinet_id) or dict(_DEFAULT, cabinet_id=cabinet_id)
+        cab = load(cabinet_id) or dict(_defaults(), cabinet_id=cabinet_id)
         cab["serial"] = fields.get("serial", cab["serial"])
         cab["name"] = fields.get("name", cab["name"])
         cab["game"] = fields.get("game", cab["game"])
-        cab["game_name"] = GAME_NAMES.get(cab["game"], cab["game"])
+        cab["game_name"] = game_name(cab["game"])
+        cab["build"] = fields.get("build", cab["build"])
+        cab["song_inject"] = fields.get(
+            "song_inject", "1" if cab["song_inject"] else "0"
+        ) == "1"
         cab["version"] = fields.get("version", cab["version"])
         cab["flavor"] = fields.get("flavor", cab["flavor"])
         cab["last_seen"] = int(time.time())
@@ -426,6 +486,19 @@ def handle_frame(body: str, inventory: bool) -> str:
             for key, value in list(cab["config_pending"].items()):
                 if reported.get(key) == value:
                     cab["config_pending"].pop(key, None)
+            try:
+                cab["config_version"] = int(reported.get("meta.config_version", 0))
+            except ValueError:
+                pass
+            # Provision the webMAN agent's credential without operator work.
+            # The agent runs outside the plugin and cannot see the token baked
+            # into zucchini.sprx, and that token must not be reused here
+            # anyway, so the connector pushes its own through the config
+            # channel the cabinet already applies and saves.
+            if "network.agent_token" in reported and (
+                reported["network.agent_token"] != settings.agent_token
+            ):
+                cab["config_pending"]["network.agent_token"] = settings.agent_token
         try:
             cab["acked_seq"] = max(cab["acked_seq"], int(fields.get("seq", "0")))
         except ValueError:

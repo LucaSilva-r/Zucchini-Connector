@@ -135,13 +135,14 @@
             <RadioIcon /> {online ? "Online" : "Offline"}
           </Badge>
           <Badge variant="outline">{cabinet.game_name || cabinet.game || "Unknown build"}</Badge>
+          {#if cabinet.game && !cabinet.song_inject}<Badge variant="outline" class="text-amber-700 dark:text-amber-400">No custom songs</Badge>{/if}
           {#if !cabinet.managed}<Badge variant="outline">Unmanaged</Badge>{/if}
           {#if cabinet.queued_selection !== null}<Badge variant="outline" class="text-amber-700 dark:text-amber-400">Next selection queued</Badge>{/if}
           {#if pending}<Badge variant="outline" class="text-amber-700 dark:text-amber-400"><Clock3Icon /> Sync pending</Badge>{:else}<Badge variant="outline" class="text-emerald-700 dark:text-emerald-400"><CircleCheckIcon /> Synced</Badge>{/if}
         </div>
         <Card.Title class="truncate text-lg">{cabinet.name || "Unnamed cabinet"}</Card.Title>
         <Card.Description class="mt-0.5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs break-all">
-          <span>ID {cabinet.cabinet_id}</span><span>Serial {cabinet.serial || "—"}</span><span>Zucchini {cabinet.version || "—"}</span>
+          <span>ID {cabinet.cabinet_id}</span><span>Serial {cabinet.serial || "—"}</span><span>Build {cabinet.build || cabinet.game || "—"}</span><span>Zucchini {cabinet.version || "—"}</span>
         </Card.Description>
       </div>
 

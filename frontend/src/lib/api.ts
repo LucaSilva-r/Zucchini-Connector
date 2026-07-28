@@ -111,6 +111,18 @@ export const deleteCabinet = (token: string, cabinetId: string) =>
 export const exitCabinetGame = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/exit`, { method: "POST" });
 
+export type WebmanAction = "restart_game" | "exit_game" | "reboot";
+
+export const runWebmanAction = (token: string, cabinetId: string, action: WebmanAction) =>
+  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/webman`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+
+export const requestScreenshot = (token: string, cabinetId: string) =>
+  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/screenshot`, { method: "POST" });
+
 export const resyncCabinet = (token: string, cabinetId: string) =>
   apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/resync`, { method: "POST" });
 

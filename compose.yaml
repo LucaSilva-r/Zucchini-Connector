@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     ports:
       - "${CONNECTOR_HTTPS_PORT:-8443}:8090"
+      # Plain HTTP for webMAN agents on the cabinets. Not a second way into the
+      # UI: it serves only /api/agent/poll. Keep it on the arcade LAN.
+      - "${CONNECTOR_AGENT_PORT:-8080}:8080"
     # Run as the host user so files written into ./storage stay editable
     # outside the container. Export UID/GID (id -u / id -g) to override.
     user: "${UID:-1000}:${GID:-1000}"
@@ -13,6 +16,10 @@ services:
       # private, user-owned HOME, which the entrypoint creates on startup.
       HOME: /tmp/connector-home
       CONNECTOR_API_TOKEN: "${CONNECTOR_API_TOKEN:-}"
+      # Credential for the webMAN agent channel. Left blank, the connector
+      # generates one into storage/agent_token. Never reuse the API token:
+      # this one crosses the LAN in clear and lands on every cabinet's disk.
+      CONNECTOR_AGENT_TOKEN: "${CONNECTOR_AGENT_TOKEN:-}"
       CONNECTOR_MANAGEMENT_PIN: "${CONNECTOR_MANAGEMENT_PIN:-2585}"
       CONNECTOR_AT3_BITRATE_KBPS: "${CONNECTOR_AT3_BITRATE_KBPS:-256}"
       CONNECTOR_CONVERSION_WORKERS: "${CONNECTOR_CONVERSION_WORKERS:-4}"

@@ -32,7 +32,9 @@ COPY docker/connector-entrypoint.sh /usr/local/bin/connector-entrypoint
 RUN chmod +x /usr/local/bin/connector-entrypoint
 RUN mkdir -p /app/storage/SONGS/TJA /app/storage/SONGS/OSU /app/storage/SONGS/CONVERTED /app/storage/cabinets /app/storage/updates
 
-EXPOSE 8090
+# 8090 is the TLS app port; 8080 is the plain-HTTP webMAN agent listener the
+# app starts itself (webMAN has no TLS stack, so it cannot use 8090).
+EXPOSE 8090 8080
 ENTRYPOINT ["/usr/local/bin/connector-entrypoint"]
 # Cabinets treat 60 s of inbound silence on the control socket as a dead link
 # and reconnect. These pings are the only guaranteed inbound traffic, so the

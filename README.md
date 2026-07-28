@@ -127,7 +127,65 @@ saw). `M\n` carries:
   itself: the **Close game** button on the Control tab does it on request,
   behind a confirmation, once an operator is watching. The game exits to XMB,
   where the drum still works as a controller, so the same remote controls
-  relaunch it — and the relaunch is what applies the new build.
+  relaunch it — and the relaunch is what applies the new build. On a console
+  running webMAN MOD, **Restart game** does that round trip unattended (below).
+
+### Console commands (webMAN agent)
+
+Commands that must outlive the game — reboot, exit to XMB, relaunch the title —
+are webMAN MOD web commands, delivered by a standalone ~9 KB VSH plugin
+([zucchini-webman-agent]) — not a webMAN fork, so webMAN stays stock and
+updatable. It lives in VSH, so it is up whenever the console is; the Zucchini
+plugin cannot do this job, because it dies with the game and a PS3 game process
+has no route to its own console.
+
+The agent long-polls `/api/agent/poll` and runs each returned path through
+webMAN's own HTTP server on the console's loopback. The browser only picks an
+action name; paths are a fixed table in `app/main.py` (`restart_game`,
+`exit_game`, `reboot`). There is no shutdown action on purpose: nothing here
+can power a console back on.
+`restart_game` is the unattended plugin-update round trip:
+`/xmb.ps3$exit;/wait.ps3?xmb;/wait.ps3?5;/pad.ps3?cross`.
+
+- **Transport**: outbound only, so cabinets behind NAT need no forwarding.
+  webMAN has no TLS, so this route gets its **own plain-HTTP listener** on
+  `AGENT_PORT` (default 8080) serving that single endpoint — the UI, its
+  cookies, and the catalog stay on HTTPS. Keep the agent port on the arcade LAN.
+- **Credential**: a dedicated `AGENT_TOKEN`, generated once into
+  `storage/agent_token`. Deliberately *not* the catalog/API token, which also
+  mints TaikOnline cards: the agent token crosses the LAN in clear and is
+  stored on every cabinet's disk. The connector provisions it automatically —
+  when a cabinet reports a `network.agent_token` that differs, the value is
+  queued through the normal config channel, the plugin saves it, and the agent
+  picks it up on its next config reload. No operator step.
+- **Presence**: `agent_online` / `agent_state` on the cabinet record, available
+  even while the cabinet's own control socket is down. The connector logs one
+  line when an agent comes online.
+- **Screenshots**: one button, route chosen server-side. The plugin captures a
+  running game (webMAN refuses to while a game plays); the agent captures the
+  XMB (the plugin is dead then). Agent capture needs a webMAN built with
+  `XMB_SCREENSHOT` — `[Full]` has it, `[Rebug-PS3MAPI]` and `[lite]` do not.
+  The button itself is not part of the console-control panel: it is read-only,
+  and on a cabinet with no agent the plugin still serves it.
+
+  **Under RPCS3 captures are black.** The plugin reads the RSX local memory the
+  game scans out, which on real hardware is the displayed frame; RPCS3 renders
+  on the host GPU and only writes it back to guest memory when
+  *Configuration → GPU → Write Color Buffers* is enabled. Not a fault on
+  hardware, which is the case that matters.
+
+[zucchini-webman-agent]: https://github.com/LucaSilva-r/zucchini-webman-agent
+
+### Reported build and custom-song support
+
+The cabinet reports its build code (`game=ST71`), the full build id the game
+prints on its own boot-check screen (`build=ST7100-1-…`), and `song_inject`,
+which is the plugin's own answer to "did the patcher resolve this build's
+song-select injection sites". Custom songs are still downloaded and installed
+on a build without it, they just never appear in song select, so the dashboard
+and the song picker say so rather than letting an operator find out later.
+Build names are keyed on the series part of the code (`ST7` = White) because
+one game ships under several variant digits.
 
 Changes queued while a cabinet is offline persist and are delivered when it
 reconnects. Cabinet liveness is socket presence — there is no HTTP polling and

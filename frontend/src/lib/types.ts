@@ -4,7 +4,14 @@ export type Cabinet = {
   name: string;
   game: string;
   game_name: string;
+  build: string;
   version: string;
+  song_inject: boolean;
+  config_version: number;
+  agent_ever: boolean;
+  agent_online: boolean;
+  agent_state: string;
+  agent_seen: number;
   flavor: string;
   last_seen: number;
   have: string[];
