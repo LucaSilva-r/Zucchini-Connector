@@ -147,10 +147,21 @@ can power a console back on.
 `restart_game` is the unattended plugin-update round trip:
 `/xmb.ps3$exit;/wait.ps3?xmb;/wait.ps3?5;/pad.ps3?cross`.
 
+The dashboard's **Games** tab is populated by the same VSH agent. It reports
+only direct installed applications below `/dev_hdd0/game`, using each
+`PARAM.SFO` for its title and `ICON0.PNG` for its thumbnail. An operator can
+choose a one-shot-per-boot autoboot directory and delay, refresh the inventory,
+or switch versions immediately. A switch is delivered as one ordered batch:
+webMAN exits the current title and begins the XMB transition, then the agent
+waits for XMB's loader and selects the requested directory through Sony's stock
+`game_ext_plugin` launch pipeline. This remains unambiguous when multiple Taiko
+revisions share `SCEEXE001`.
+
 - **Transport**: outbound only, so cabinets behind NAT need no forwarding.
   webMAN has no TLS, so this route gets its **own plain-HTTP listener** on
-  `AGENT_PORT` (default 8080) serving that single endpoint — the UI, its
-  cookies, and the catalog stay on HTTPS. Keep the agent port on the arcade LAN.
+  `AGENT_PORT` (default 8080) serving only authenticated `/api/agent/*` routes
+  — the UI, its cookies, and the catalog stay on HTTPS. Keep the agent port on
+  the arcade LAN.
 - **Credential**: a dedicated `AGENT_TOKEN`, generated once into
   `storage/agent_token`. Deliberately *not* the catalog/API token, which also
   mints TaikOnline cards: the agent token crosses the LAN in clear and is

@@ -1,14 +1,14 @@
-"""webMAN agent channel.
+"""Standalone VSH-agent channel.
 
 The Zucchini plugin dies with the game, so it cannot act during the gap that
 matters most — after a title exits and before the next one starts. The agent is
-a thread inside a webMAN MOD fork, which lives in VSH and is therefore up
-whenever the console is.
+a separate VSH plugin, which is therefore up whenever the console is.
 
 It long-polls this module over plain HTTP: webMAN has no TLS, and a PS3 game
 process has no route to its own console, so neither WSS nor a loopback relay
 was available. Commands are webMAN web-command paths, executed on the console
-by webMAN's own handler.
+by webMAN's own handler. Agent-native verbs also report installed HDD games,
+configure autoboot, and launch a selected directory through game_ext_plugin.
 """
 
 from __future__ import annotations

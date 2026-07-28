@@ -6,7 +6,8 @@ services:
     ports:
       - "${CONNECTOR_HTTPS_PORT:-8443}:8090"
       # Plain HTTP for webMAN agents on the cabinets. Not a second way into the
-      # UI: it serves only /api/agent/poll. Keep it on the arcade LAN.
+      # UI: it serves only authenticated /api/agent/* routes. Keep it on the
+      # arcade LAN.
       - "${CONNECTOR_AGENT_PORT:-8080}:8080"
     # Run as the host user so files written into ./storage stay editable
     # outside the container. Export UID/GID (id -u / id -g) to override.

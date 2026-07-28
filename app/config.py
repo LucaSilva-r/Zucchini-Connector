@@ -68,8 +68,9 @@ class Settings:
             300, int(env("MANAGEMENT_SESSION_SECONDS", str(8 * 60 * 60)))
         )
         # Plain-HTTP listener for webMAN agents. webMAN has no TLS stack, so
-        # this cannot be the HTTPS port; it serves only the agent poll route
-        # and is meant for the arcade LAN. 0 disables it.
+        # this cannot be the HTTPS port; it serves only authenticated agent
+        # poll, inventory and upload routes and is meant for the arcade LAN.
+        # 0 disables it.
         self.agent_port = int(env("AGENT_PORT", "8080"))
         # Deliberately NOT api_token: that one is the TaikOnline card-issuer
         # credential, and the agent channel is cleartext and its token ends up
