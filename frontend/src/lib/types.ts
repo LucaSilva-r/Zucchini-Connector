@@ -12,6 +12,10 @@ export type Cabinet = {
   agent_online: boolean;
   agent_state: string;
   agent_seen: number;
+  installed_games: InstalledGame[];
+  games_updated_at: number;
+  autoboot_dir: string;
+  autoboot_delay: number;
   flavor: string;
   last_seen: number;
   have: string[];
@@ -62,6 +66,14 @@ export type Cabinet = {
   update_error: string;
   control_online: boolean;
   control_operator: boolean;
+};
+
+export type InstalledGame = {
+  directory: string;
+  title_id: string;
+  title: string;
+  version: string;
+  has_icon: boolean;
 };
 
 export type ZucchiniUpdate = {

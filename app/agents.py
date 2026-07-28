@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from urllib.parse import quote, unquote
 
 # How long a poll is held open before answering with an empty body. Long
 # enough that an idle cabinet is nearly silent, short enough that the agent's
@@ -23,6 +24,92 @@ POLL_HOLD_SECONDS = 25
 # An agent that has not polled within this window is treated as gone. Two
 # missed polls, so one lost round trip does not flap the UI.
 PRESENCE_SECONDS = POLL_HOLD_SECONDS * 2 + 10
+MAX_INSTALLED_GAMES = 256
+
+
+def validate_game_directory(directory: str) -> str:
+    """Validate one direct child name below /dev_hdd0/game."""
+    if (
+        not directory
+        or len(directory.encode("utf-8")) >= 64
+        or directory in {".", ".."}
+        or any(ord(c) < 0x20 or c in "/\\" or ord(c) == 0x7F for c in directory)
+    ):
+        raise ValueError("Invalid installed-game directory")
+    return directory
+
+
+def _game_directory(value: str) -> str:
+    return validate_game_directory(unquote(value))
+
+
+def parse_games_report(body: bytes) -> dict[str, object]:
+    """Parse the VSH agent's percent-escaped installed-game report.
+
+    The format is deliberately line-oriented so the PS3 needs no JSON writer:
+
+      version=1
+      autoboot=<escaped directory>
+      delay=15
+      game<TAB>dir<TAB>title_id<TAB>title<TAB>version<TAB>has_icon
+    """
+    if not body or len(body) > 64 * 1024:
+        raise ValueError("Bad installed-game report size")
+    text = body.decode("utf-8", errors="strict")
+    protocol = 0
+    autoboot = ""
+    delay = 15
+    games: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    for raw in text.splitlines():
+        if raw.startswith("version="):
+            protocol = int(raw.removeprefix("version=") or "0")
+        elif raw.startswith("autoboot="):
+            encoded = raw.removeprefix("autoboot=")
+            autoboot = _game_directory(encoded) if encoded else ""
+        elif raw.startswith("delay="):
+            delay = max(0, min(600, int(raw.removeprefix("delay=") or "15")))
+        elif raw.startswith("game\t"):
+            fields = raw.split("\t")
+            if len(fields) != 6 or len(games) >= MAX_INSTALLED_GAMES:
+                raise ValueError("Malformed installed-game entry")
+            directory = _game_directory(fields[1])
+            if directory in seen:
+                continue
+            seen.add(directory)
+            title_id = unquote(fields[2])[:32]
+            title = unquote(fields[3])[:256]
+            game_version = unquote(fields[4])[:32]
+            if not title_id or not title:
+                raise ValueError("Installed-game entry lacks title metadata")
+            games.append(
+                {
+                    "directory": directory,
+                    "title_id": title_id,
+                    "title": title,
+                    "version": game_version,
+                    "has_icon": fields[5] == "1",
+                }
+            )
+
+    if protocol != 1:
+        raise ValueError("Unsupported installed-game report version")
+    games.sort(key=lambda game: (str(game["title"]).casefold(), str(game["directory"])))
+    return {
+        "installed_games": games,
+        "autoboot_dir": autoboot,
+        "autoboot_delay": delay,
+    }
+
+
+def launch_command(directory: str) -> str:
+    return "launch\t" + quote(validate_game_directory(directory), safe="")
+
+
+def autoboot_command(directory: str, delay: int) -> str:
+    encoded = quote(validate_game_directory(directory), safe="") if directory else ""
+    return f"autoboot\t{encoded}\t{max(0, min(600, int(delay)))}"
 
 
 class AgentHub:
@@ -66,9 +153,13 @@ class AgentHub:
         chain honest: a command parked for a console that is off would look
         delivered and then fire at an unpredictable moment.
         """
-        if not self.online(cabinet_id):
+        return self.enqueue_many(cabinet_id, [path])
+
+    def enqueue_many(self, cabinet_id: str, commands: list[str]) -> bool:
+        """Queue an ordered batch that one poll drains atomically."""
+        if not self.online(cabinet_id) or not commands:
             return False
-        self._pending.setdefault(cabinet_id, []).append(path)
+        self._pending.setdefault(cabinet_id, []).extend(commands)
         self._event(cabinet_id).set()
         return True
 

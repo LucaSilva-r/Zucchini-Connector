@@ -66,6 +66,11 @@ _DEFAULT = {
     # (an RPCS3 instance, say) is not shown buttons that cannot work — and one
     # that has keeps them while the agent is merely offline.
     "agent_ever": False,
+    # Reported by the VSH agent from direct children of /dev_hdd0/game only.
+    "installed_games": [],
+    "games_updated_at": 0,
+    "autoboot_dir": "",
+    "autoboot_delay": 15,
     "last_seen": 0,
     "have": [],
     "reported_cfg": "",
@@ -189,6 +194,26 @@ def mark_agent_seen(cabinet_id: str) -> None:
             return
         cab["agent_ever"] = True
         _save(cab)
+
+
+def set_installed_games(
+    cabinet_id: str,
+    games: list[dict[str, object]],
+    autoboot_dir: str,
+    autoboot_delay: int,
+) -> dict | None:
+    """Replace the last complete installed-HDD inventory from the VSH agent."""
+    with _lock:
+        cab = load(cabinet_id)
+        if cab is None:
+            return None
+        cab["agent_ever"] = True
+        cab["installed_games"] = copy.deepcopy(games)
+        cab["games_updated_at"] = int(time.time())
+        cab["autoboot_dir"] = autoboot_dir
+        cab["autoboot_delay"] = max(0, min(600, int(autoboot_delay)))
+        _save(cab)
+        return cab
 
 
 def force_resync(cabinet_id: str) -> dict | None:

@@ -123,6 +123,34 @@ export const runWebmanAction = (token: string, cabinetId: string, action: Webman
 export const requestScreenshot = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/screenshot`, { method: "POST" });
 
+export const refreshInstalledGames = (token: string, cabinetId: string) =>
+  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/games/refresh`, {
+    method: "POST",
+  });
+
+export const saveGameAutoboot = (
+  token: string,
+  cabinetId: string,
+  directory: string,
+  delay: number,
+) =>
+  apiRequest<{ status: string; directory: string; delay: number }>(
+    token,
+    `/cabinets/${cabinetId}/games/autoboot`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ directory, delay }),
+    },
+  );
+
+export const launchInstalledGame = (token: string, cabinetId: string, directory: string) =>
+  apiRequest<{ status: string; directory: string }>(token, `/cabinets/${cabinetId}/games/launch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ directory }),
+  });
+
 export const resyncCabinet = (token: string, cabinetId: string) =>
   apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/resync`, { method: "POST" });
 

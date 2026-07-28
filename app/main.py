@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 from threading import Thread
@@ -96,6 +97,63 @@ async def agent_poll(id: str = "", state: str = "") -> Response:
     return Response(
         "".join(f"{command}\n" for command in commands), media_type="text/plain"
     )
+
+
+@agent_api.post("/games", dependencies=[Depends(require_agent_token)])
+async def agent_games(request: Request, id: str = "") -> dict[str, object]:
+    """Receive the complete /dev_hdd0/game inventory from one VSH agent."""
+    if not id:
+        raise HTTPException(status_code=400, detail="Cabinet id required")
+    try:
+        report = agents.parse_games_report(await request.body())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    saved = await asyncio.to_thread(
+        cabinets.set_installed_games,
+        id,
+        report["installed_games"],
+        report["autoboot_dir"],
+        report["autoboot_delay"],
+    )
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return {
+        "status": "stored",
+        "games": len(report["installed_games"]),
+    }
+
+
+def _game_icon_path(cabinet_id: str, directory: str) -> Path:
+    safe_id = "".join(c for c in cabinet_id if c.isalnum() or c in "-_")
+    digest = hashlib.sha256(directory.encode("utf-8")).hexdigest()
+    return settings.cabinets_root / "uploads" / safe_id / "games" / f"{digest}.png"
+
+
+@agent_api.post("/game-icon", dependencies=[Depends(require_agent_token)])
+async def agent_game_icon(
+    request: Request, id: str = "", dir: str = ""
+) -> dict[str, object]:
+    if not id:
+        raise HTTPException(status_code=400, detail="Cabinet id required")
+    try:
+        directory = agents.validate_game_directory(dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if cabinets.load(id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    body = await request.body()
+    if (
+        len(body) < 8
+        or len(body) > 4 * 1024 * 1024
+        or not body.startswith(b"\x89PNG\r\n\x1a\n")
+    ):
+        raise HTTPException(status_code=400, detail="Invalid ICON0.PNG")
+    path = _game_icon_path(id, directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    await asyncio.to_thread(tmp.write_bytes, body)
+    await asyncio.to_thread(os.replace, tmp, path)
+    return {"status": "stored", "bytes": len(body)}
 
 
 # Screenshots are XMB-only: webMAN's saveBMP() pauses the RSX FIFO and refuses
@@ -469,6 +527,108 @@ def cabinet_show(cabinet_id: str) -> dict[str, object]:
     if cab is None:
         raise HTTPException(status_code=404, detail="Cabinet not found")
     return control.hub.decorate(cab)
+
+
+def _installed_game(cab: dict, directory: str) -> dict[str, object] | None:
+    return next(
+        (
+            game
+            for game in cab.get("installed_games", [])
+            if isinstance(game, dict) and game.get("directory") == directory
+        ),
+        None,
+    )
+
+
+@ui_api.get(
+    "/cabinets/{cabinet_id}/games/{directory}/icon",
+    dependencies=[Depends(auth.require_management)],
+)
+def cabinet_game_icon(cabinet_id: str, directory: str) -> Response:
+    cab = cabinets.load(cabinet_id)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    game = _installed_game(cab, directory)
+    if game is None or not game.get("has_icon"):
+        raise HTTPException(status_code=404, detail="Game icon not available")
+    path = _game_icon_path(cabinet_id, directory)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Game icon not uploaded yet")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@ui_api.post(
+    "/cabinets/{cabinet_id}/games/refresh",
+    dependencies=[Depends(auth.require_management)],
+)
+def cabinet_games_refresh(cabinet_id: str) -> dict[str, str]:
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if not agents.hub.enqueue(cabinet_id, "inventory"):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    return {"status": "requested"}
+
+
+@ui_api.put(
+    "/cabinets/{cabinet_id}/games/autoboot",
+    dependencies=[Depends(auth.require_management)],
+)
+def cabinet_game_autoboot(
+    cabinet_id: str,
+    directory: str = Body(default="", embed=True),
+    delay: int = Body(default=15, embed=True),
+) -> dict[str, object]:
+    cab = cabinets.load(cabinet_id)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if directory and _installed_game(cab, directory) is None:
+        raise HTTPException(status_code=400, detail="Game is not installed on this cabinet")
+    try:
+        command = agents.autoboot_command(directory, delay)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not agents.hub.enqueue(cabinet_id, command):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    return {
+        "status": "requested",
+        "directory": directory,
+        "delay": max(0, min(600, int(delay))),
+    }
+
+
+@ui_api.post(
+    "/cabinets/{cabinet_id}/games/launch",
+    dependencies=[Depends(auth.require_management)],
+)
+def cabinet_game_launch(
+    cabinet_id: str, directory: str = Body(embed=True)
+) -> dict[str, str]:
+    cab = cabinets.load(cabinet_id)
+    if cab is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if _installed_game(cab, directory) is None:
+        raise HTTPException(status_code=400, detail="Game is not installed on this cabinet")
+    try:
+        launch = agents.launch_command(directory)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # One queue batch is drained by one poll and executed line-by-line by the
+    # VSH agent. webMAN does not return from the first line until XMB is ready;
+    # only then can the proven game_ext_plugin launch command run.
+    if not agents.hub.enqueue_many(
+        cabinet_id,
+        [
+            "/xmb.ps3$exit;/wait.ps3?xmb;/wait.ps3?2",
+            launch,
+        ],
+    ):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    return {"status": "switching", "directory": directory}
 
 
 @ui_api.websocket("/cabinets/{cabinet_id}/control")

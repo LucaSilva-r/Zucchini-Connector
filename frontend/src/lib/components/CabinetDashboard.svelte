@@ -12,6 +12,7 @@
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import ConfigPanel from "$lib/components/ConfigPanel.svelte";
+  import GameSwitcher from "$lib/components/GameSwitcher.svelte";
   import ManagementGate from "$lib/components/ManagementGate.svelte";
   import RemoteControl from "$lib/components/RemoteControl.svelte";
   import SongSelection from "$lib/components/SongSelection.svelte";
@@ -223,6 +224,7 @@
     <Tabs.Root bind:value={tab}>
       <Tabs.List class="mb-3 max-w-full">
         <Tabs.Trigger value="songs">Library</Tabs.Trigger>
+        {#if cabinet.agent_ever}<Tabs.Trigger value="games">Games</Tabs.Trigger>{/if}
         <Tabs.Trigger value="control">Control</Tabs.Trigger>
         <Tabs.Trigger value="config">Config</Tabs.Trigger>
         <Tabs.Trigger value="update">Update</Tabs.Trigger>
@@ -231,6 +233,7 @@
            only while selected: the controller must not hold a socket (or the
            keyboard) from behind the song list. -->
       <Tabs.Content value="songs">{#if tab === "songs"}<SongSelection {token} {cabinet} {library} onSaved={onUpdated} />{/if}</Tabs.Content>
+      <Tabs.Content value="games">{#if tab === "games"}<ManagementGate><GameSwitcher {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="control">{#if tab === "control"}<ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="config">{#if tab === "config"}<ManagementGate><ConfigPanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="update">{#if tab === "update"}<ManagementGate><UpdatePanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
