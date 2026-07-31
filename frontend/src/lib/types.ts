@@ -12,6 +12,7 @@ export type Cabinet = {
   agent_online: boolean;
   agent_state: string;
   agent_seen: number;
+  agent_health: AgentHealth;
   installed_games: InstalledGame[];
   games_updated_at: number;
   autoboot_dir: string;
@@ -66,6 +67,34 @@ export type Cabinet = {
   update_error: string;
   control_online: boolean;
   control_operator: boolean;
+  itaiko: ItaikoStatus;
+};
+
+export type ItaikoStatus = {
+  state: "disconnected" | "busy" | "ready" | "error";
+  version: string;
+  edition: string;
+  settings: Record<string, number>;
+  error: string;
+};
+
+/* Relayed from webMAN's own info page, so every field is best-effort: a
+   different edition, language or build simply reports fewer of them. 0 and ""
+   mean "not reported", never a real reading. */
+export type AgentHealth = {
+  cpu_temp: number;
+  rsx_temp: number;
+  max_temp?: number;
+  fan_percent: number;
+  mem_kb?: number;
+  gpu_mhz?: number;
+  vram_mhz?: number;
+  hdd_free?: string;
+  firmware?: string;
+  runtime?: string;
+  power_ons?: number;
+  text?: string;
+  updated_at?: number;
 };
 
 export type InstalledGame = {

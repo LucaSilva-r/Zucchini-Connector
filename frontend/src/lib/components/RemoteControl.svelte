@@ -3,6 +3,7 @@
   import PowerIcon from "@lucide/svelte/icons/power";
   import RadioIcon from "@lucide/svelte/icons/radio";
   import CameraIcon from "@lucide/svelte/icons/camera";
+  import ThermometerIcon from "@lucide/svelte/icons/thermometer";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
@@ -181,6 +182,12 @@
   // Either half can capture: the plugin while the game runs, webMAN once it
   // has exited. Between them there is no state that cannot be seen.
   const canCapture = $derived(cabinet.agent_online || cabinet.control_online);
+  // Only the one figure worth interrupting a control session for; the rest
+  // lives on the Console tab. 80 C is where webMAN's own dynamic fan control
+  // is already at full tilt.
+  const hotCabinet = $derived(
+    Math.max(cabinet.agent_health?.cpu_temp ?? 0, cabinet.agent_health?.rsx_temp ?? 0) >= 80,
+  );
   let webmanPending = $state<WebmanAction | null>(null);
   let webmanBusy = $state(false);
   let webmanError = $state("");
@@ -290,6 +297,13 @@
       </Badge>
       {#if cabinet.agent_online}
         <Badge variant="outline">Console {cabinet.agent_state === "game" ? "in game" : "on XMB"}</Badge>
+      {/if}
+      {#if hotCabinet}
+        <!-- A cabinet cooking itself is worth interrupting for, so the warning
+             stays here even though the readings themselves are a tab away. -->
+        <Badge variant="outline" class="border-destructive/50 text-destructive">
+          <ThermometerIcon /> {cabinet.agent_health.cpu_temp}°C — see Console tab
+        </Badge>
       {/if}
       <Button variant="outline" size="sm" disabled={!canCapture || shotBusy} onclick={takeScreenshot}>
         <CameraIcon /> {shotBusy ? "Capturing…" : "Screenshot"}

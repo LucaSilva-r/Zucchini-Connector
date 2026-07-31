@@ -43,6 +43,14 @@ MAX_MESSAGE_BYTES = 4096
 MAX_HEARTBEAT_BYTES = 256 * 1024
 # `P\n` package-state slices come out of a 64 KiB cabinet buffer.
 MAX_PACKAGE_BYTES = 96 * 1024
+ITAIKO_SETTING_LIMITS = {
+    **{key: 4095 for key in range(0, 4)},
+    **{key: 1000 for key in range(4, 9)},
+    9: 1,
+    **{key: 4095 for key in range(10, 18)},
+    46: 50,
+}
+ITAIKO_STATES = {"disconnected", "busy", "ready", "error"}
 
 
 def _token_ok(candidate: str) -> bool:
@@ -56,6 +64,7 @@ class ControlHub:
         self._cabinets: dict[str, WebSocket] = {}
         self._operators: dict[str, WebSocket] = {}
         self._viewers: dict[str, set[WebSocket]] = {}
+        self._itaiko: dict[str, dict[str, object]] = {}
 
     def status(self, cabinet_id: str) -> dict[str, bool]:
         with self._lock:
@@ -71,10 +80,24 @@ class ControlHub:
         broadcast report it without each having to know about the agent hub.
         """
         cabinet_id = str(cabinet.get("cabinet_id") or "")
+        with self._lock:
+            itaiko = dict(
+                self._itaiko.get(
+                    cabinet_id,
+                    {
+                        "state": "disconnected",
+                        "version": "",
+                        "edition": "",
+                        "settings": {},
+                        "error": "",
+                    },
+                )
+            )
         return {
             **cabinet,
             **self.status(cabinet_id),
             **agents.hub.status(cabinet_id),
+            "itaiko": itaiko,
         }
 
     async def _replace(
@@ -163,6 +186,105 @@ class ControlHub:
             self._remove(self._cabinets, cabinet_id, cabinet)
             return False
 
+    async def request_itaiko_read(self, cabinet_id: str) -> bool:
+        cabinet = self._get(self._cabinets, cabinet_id)
+        if cabinet is None:
+            return False
+        try:
+            await cabinet.send_text("I GET\n")
+            return True
+        except RuntimeError:
+            self._remove(self._cabinets, cabinet_id, cabinet)
+            return False
+
+    @staticmethod
+    def validate_itaiko_settings(settings_value: object) -> dict[int, int]:
+        if not isinstance(settings_value, dict) or not settings_value:
+            raise ValueError("At least one ITAIKO setting is required")
+        normalized: dict[int, int] = {}
+        for raw_key, raw_value in settings_value.items():
+            try:
+                key = int(raw_key)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("ITAIKO settings must be integers") from exc
+            if str(key) != str(raw_key):
+                raise ValueError(f"Invalid ITAIKO setting key: {raw_key}")
+            if isinstance(raw_value, bool):
+                raise ValueError("ITAIKO settings must be integers")
+            if isinstance(raw_value, int):
+                value = raw_value
+            elif isinstance(raw_value, str) and raw_value.isdigit():
+                value = int(raw_value)
+            else:
+                raise ValueError("ITAIKO settings must be integers")
+            maximum = ITAIKO_SETTING_LIMITS.get(key)
+            if maximum is None:
+                raise ValueError(f"ITAIKO setting {key} is not remotely configurable")
+            if value < 0 or value > maximum:
+                raise ValueError(
+                    f"ITAIKO setting {key} must be between 0 and {maximum}"
+                )
+            normalized[key] = value
+        return normalized
+
+    async def request_itaiko_settings(
+        self, cabinet_id: str, settings_value: object
+    ) -> bool:
+        normalized = self.validate_itaiko_settings(settings_value)
+        cabinet = self._get(self._cabinets, cabinet_id)
+        if cabinet is None:
+            return False
+        pairs = " ".join(f"{key}:{normalized[key]}" for key in sorted(normalized))
+        try:
+            await cabinet.send_text(f"I SET {pairs}\n")
+            return True
+        except RuntimeError:
+            self._remove(self._cabinets, cabinet_id, cabinet)
+            return False
+
+    @staticmethod
+    def _parse_itaiko_frame(frame: str) -> tuple[str, dict[str, object]]:
+        fields: dict[str, str] = {}
+        for line in frame.splitlines():
+            if "=" not in line:
+                raise ValueError("Malformed ITAIKO status")
+            key, value = line.split("=", 1)
+            if key in fields:
+                raise ValueError("Duplicate ITAIKO status field")
+            fields[key] = value.strip()
+        state = fields.get("state", "")
+        if state not in ITAIKO_STATES:
+            raise ValueError("Invalid ITAIKO state")
+        version = fields.get("version", "")
+        edition = fields.get("edition", "")
+        error = fields.get("error", "")
+        if any(len(value) > 160 for value in (version, edition, error)):
+            raise ValueError("ITAIKO status field is too long")
+        raw_settings: dict[str, int] = {}
+        settings_line = fields.get("settings", "")
+        if settings_line:
+            pairs: dict[str, str] = {}
+            for token in settings_line.split():
+                if ":" not in token:
+                    raise ValueError("Malformed ITAIKO setting")
+                key, value = token.split(":", 1)
+                if key in pairs:
+                    raise ValueError("Duplicate ITAIKO setting")
+                pairs[key] = value
+            normalized = ControlHub.validate_itaiko_settings(pairs)
+            raw_settings = {str(key): value for key, value in normalized.items()}
+        return fields.get("id", ""), {
+            "state": state,
+            "version": version,
+            "edition": edition,
+            "settings": raw_settings,
+            "error": error,
+        }
+
+    def _set_itaiko(self, cabinet_id: str, value: dict[str, object]) -> None:
+        with self._lock:
+            self._itaiko[cabinet_id] = value
+
     async def _operator_status(self, cabinet_id: str, online: bool) -> None:
         operator = self._get(self._operators, cabinet_id)
         if operator is None:
@@ -220,6 +342,7 @@ class ControlHub:
                     # size budgets, and only `H` may replace the inventory.
                     is_heartbeat = message.startswith("H\n")
                     is_packages = message.startswith("P\n")
+                    is_itaiko = message.startswith("I\n")
                     limit = MAX_MESSAGE_BYTES
                     if is_heartbeat:
                         limit = MAX_HEARTBEAT_BYTES
@@ -228,7 +351,12 @@ class ControlHub:
                     if len(message.encode("utf-8")) > limit:
                         await websocket.close(code=1009, reason="Message too large")
                         break
-                    if is_heartbeat or is_packages or message.startswith("T\n"):
+                    if (
+                        is_heartbeat
+                        or is_packages
+                        or is_itaiko
+                        or message.startswith("T\n")
+                    ):
                         frame = message[2:]
                         reported_id = next(
                             (
@@ -243,15 +371,21 @@ class ControlHub:
                                 code=1008, reason="Cabinet ID mismatch"
                             )
                             break
-                        # Frame handling writes the cabinet file and a whole
-                        # `P` slice to sqlite. On the loop thread that stalls
-                        # every other cabinet's socket — including the pings
-                        # that keep it alive — so a busy cabinet would knock
-                        # its neighbours offline. Hand it to a worker thread;
-                        # `cabinets` is already lock-guarded.
-                        await asyncio.to_thread(
-                            cabinets.handle_frame, frame, is_heartbeat
-                        )
+                        if is_itaiko:
+                            try:
+                                _, itaiko = self._parse_itaiko_frame(frame)
+                            except ValueError:
+                                await websocket.close(
+                                    code=1008, reason="Invalid ITAIKO status"
+                                )
+                                break
+                            self._set_itaiko(cabinet_id, itaiko)
+                        else:
+                            # Persistent cabinet frames are parsed and written
+                            # off-loop; live ITAIKO state stays in memory.
+                            await asyncio.to_thread(
+                                cabinets.handle_frame, frame, is_heartbeat
+                            )
                         await self._broadcast_status(cabinet_id)
                 except asyncio.TimeoutError:
                     pass
@@ -268,6 +402,13 @@ class ControlHub:
             # here overwrote the new connection's online notice, leaving the
             # operator view stuck at "Cabinet offline" while frames flowed.
             if self._remove(self._cabinets, cabinet_id, websocket):
+                with self._lock:
+                    previous = self._itaiko.get(cabinet_id, {})
+                    self._itaiko[cabinet_id] = {
+                        **previous,
+                        "state": "disconnected",
+                        "error": "Cabinet is not connected",
+                    }
                 await self._operator_status(cabinet_id, False)
                 await self._broadcast_status(cabinet_id)
 

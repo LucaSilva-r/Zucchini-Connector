@@ -82,7 +82,9 @@ def require_agent_token(
 
 
 @agent_api.get("/poll", dependencies=[Depends(require_agent_token)])
-async def agent_poll(id: str = "", state: str = "") -> Response:
+async def agent_poll(
+    id: str = "", state: str = "", cpu_temp: str = "", rsx_temp: str = "", fan: str = ""
+) -> Response:
     """Long-poll for webMAN commands. Body is one command path per line.
 
     Plain text because the client is C inside webMAN with no JSON parser, and
@@ -92,6 +94,7 @@ async def agent_poll(id: str = "", state: str = "") -> Response:
     if not id:
         raise HTTPException(status_code=400, detail="Cabinet id required")
     agents.hub.note_seen(id, state)
+    agents.hub.note_sensors(id, cpu_temp, rsx_temp, fan)
     await asyncio.to_thread(cabinets.mark_agent_seen, id)
     commands = await agents.hub.wait(id)
     return Response(
@@ -121,6 +124,24 @@ async def agent_games(request: Request, id: str = "") -> dict[str, object]:
         "status": "stored",
         "games": len(report["installed_games"]),
     }
+
+
+@agent_api.post("/health", dependencies=[Depends(require_agent_token)])
+async def agent_health(request: Request, id: str = "") -> dict[str, object]:
+    """Receive webMAN's console-info page, relayed verbatim by the agent.
+
+    Held in memory only. It is a live reading, worthless once stale, and it
+    arrives every two minutes per cabinet — a file write per push would buy
+    nothing but disk churn.
+    """
+    if not id:
+        raise HTTPException(status_code=400, detail="Cabinet id required")
+    try:
+        page = agents.parse_health(await request.body())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    agents.hub.note_health(id, page)
+    return {"status": "stored"}
 
 
 def _game_icon_path(cabinet_id: str, directory: str) -> Path:
@@ -650,6 +671,38 @@ async def cabinet_exit(cabinet_id: str) -> dict[str, str]:
     if not await control.hub.request_exit(cabinet_id):
         raise HTTPException(status_code=409, detail="Cabinet is not connected")
     return {"status": "closing"}
+
+
+@ui_api.post(
+    "/cabinets/{cabinet_id}/itaiko/read",
+    dependencies=[Depends(auth.require_management)],
+)
+async def cabinet_itaiko_read(cabinet_id: str) -> dict[str, str]:
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if not await control.hub.request_itaiko_read(cabinet_id):
+        raise HTTPException(status_code=409, detail="Cabinet is not connected")
+    return {"status": "requested"}
+
+
+@ui_api.put(
+    "/cabinets/{cabinet_id}/itaiko/settings",
+    dependencies=[Depends(auth.require_management)],
+)
+async def cabinet_itaiko_settings(
+    cabinet_id: str, itaiko_settings: dict[str, object] = Body(embed=True)
+) -> dict[str, str]:
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    try:
+        sent = await control.hub.request_itaiko_settings(
+            cabinet_id, itaiko_settings
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not sent:
+        raise HTTPException(status_code=409, detail="Cabinet is not connected")
+    return {"status": "saving"}
 
 
 # Fixed webMAN command chains. The browser picks an action name, never a path:

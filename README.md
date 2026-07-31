@@ -172,6 +172,15 @@ revisions share `SCEEXE001`.
 - **Presence**: `agent_online` / `agent_state` on the cabinet record, available
   even while the cabinet's own control socket is down. The connector logs one
   line when an agent comes online.
+- **Console health**: temperatures ride on every poll (`cpu_temp`, `rsx_temp`,
+  `fan`) from lv2's sensor syscalls, and every fourth poll the agent relays
+  webMAN's own `/cpursx.ps3` page verbatim to `/api/agent/health`. The
+  connector strips the markup and reads fan speed, free memory, HDD space, RSX
+  clocks, firmware and the lifetime counters off it — several of those sit
+  behind syscalls lv2 gates, which webMAN unlocks and the agent will not.
+  Poll readings win where both have a value. Held in memory only: a reading is
+  worthless once it is stale. Every field is optional, and the stripped page is
+  kept so the panel can show whatever the parser did not recognise.
 - **Screenshots**: one button, route chosen server-side. The plugin captures a
   running game (webMAN refuses to while a game plays); the agent captures the
   XMB (the plugin is dead then). Agent capture needs a webMAN built with

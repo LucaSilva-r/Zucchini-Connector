@@ -169,3 +169,96 @@ class AgentEverTests(unittest.TestCase):
 
         cabinets.mark_agent_seen("nosuchcab")
         self.assertIsNone(cabinets.load("nosuchcab"))
+
+
+class SensorTests(unittest.TestCase):
+    """Console health rides on the poll; a refused syscall is not an error."""
+
+    def setUp(self) -> None:
+        agents.hub = agents.AgentHub()
+
+    def test_reported_values_reach_the_status_payload(self) -> None:
+        agents.hub.note_seen(CABINET_ID, "xmb")
+        agents.hub.note_sensors(CABINET_ID, "62", "58", "41")
+        status = agents.hub.status(CABINET_ID)["agent_health"]
+        self.assertEqual(status["cpu_temp"], 62)
+        self.assertEqual(status["rsx_temp"], 58)
+        self.assertEqual(status["fan_percent"], 41)
+
+    def test_missing_or_implausible_readings_become_zero(self) -> None:
+        # lv2 gates get_fan_policy, so an empty fan field is a normal cabinet.
+        agents.hub.note_sensors(CABINET_ID, "62", "", "")
+        status = agents.hub.status(CABINET_ID)["agent_health"]
+        self.assertEqual(status["rsx_temp"], 0)
+        self.assertEqual(status["fan_percent"], 0)
+
+        agents.hub.note_sensors(CABINET_ID, "999", "-5", "12x")
+        status = agents.hub.status(CABINET_ID)["agent_health"]
+        self.assertEqual((status["cpu_temp"], status["rsx_temp"], status["fan_percent"]), (0, 0, 0))
+
+    def test_a_cabinet_that_never_reported_still_has_the_fields(self) -> None:
+        self.assertEqual(agents.hub.status("silent")["agent_health"]["cpu_temp"], 0)
+
+
+# One page as webMAN renders it: the markup around each figure, the localised
+# fan label, the Fahrenheit block that must not be mistaken for Celsius.
+WEBMAN_PAGE = b"""<html><body>
+<a href="/">Refresh</a> [KLIC] [BGM]
+SCEEXE001 Taiko no Tatsujin(S111) <b>pid=01010200</b>
+<hr><font size="42px"><b><a class="s" href="/cpursx.ps3?up">CPU: 68&deg;C (MAX: 69&deg;C)<br>
+RSX: 68&deg;C</a><hr><a class="s" href="/cpursx.ps3?dn">CPU: 154&deg;F (MAX: 156&deg;F)<br>
+RSX: 154&deg;F</a><br>GPU: 500 Mhz &bull; VRAM: 650 Mhz<hr>
+<a class="s" href="/games.ps3">MEM: 1,576 KB (XMB)</a><br>
+<a href="/dev_hdd0/">HDD: 116.7 GB free</a><hr>
+<a class="s" href="/cpursx.ps3?mode">FAN SPEED: 30% (0x4D)</a><br><hr>
+<label title="Startup">00:28:39</label>
+</font><H1>206d 23:34:09 &bull; 4,649 ON &bull; 4,627 OFF (22)</H1>
+NOR Firmware: 4.84 DEX Cobra 8.1
+</body></html>"""
+
+
+class HealthPageTests(unittest.TestCase):
+    """webMAN's info page is the only source for the figures lv2 gates."""
+
+    def setUp(self) -> None:
+        agents.hub = agents.AgentHub()
+
+    def test_figures_are_read_off_the_page(self) -> None:
+        page = agents.parse_health(WEBMAN_PAGE)
+        self.assertEqual(page["cpu_temp"], 68)
+        self.assertEqual(page["rsx_temp"], 68)
+        self.assertEqual(page["max_temp"], 69)
+        self.assertEqual(page["fan_percent"], 30)
+        self.assertEqual(page["mem_kb"], 1576)
+        self.assertEqual(page["gpu_mhz"], 500)
+        self.assertEqual(page["vram_mhz"], 650)
+        self.assertEqual(page["hdd_free"], "116.7 GB free")
+        self.assertEqual(page["firmware"], "4.84 DEX Cobra 8.1")
+        self.assertEqual(page["power_ons"], 4649)
+        self.assertIn("206d 23:34:09", str(page["runtime"]))
+
+    def test_markup_is_gone_and_the_text_survives(self) -> None:
+        text = agents.health_text(WEBMAN_PAGE)
+        self.assertNotIn("<", text)
+        self.assertIn("FAN SPEED: 30% (0x4D)", text)
+        self.assertIn("CPU: 68°C (MAX: 69°C)", text)
+
+    def test_an_unrecognised_page_yields_zeros_not_an_error(self) -> None:
+        page = agents.parse_health(b"<html><body>Access denied</body></html>")
+        self.assertEqual(page["cpu_temp"], 0)
+        self.assertEqual(page["fan_percent"], 0)
+        self.assertEqual(page["text"], "Access denied")
+
+    def test_an_oversized_page_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            agents.parse_health(b"x" * (agents.MAX_HEALTH_BYTES + 1))
+
+    def test_poll_readings_win_over_the_older_page(self) -> None:
+        # Temperatures arrive every 25 s, the page every two minutes.
+        agents.hub.note_health(CABINET_ID, agents.parse_health(WEBMAN_PAGE))
+        agents.hub.note_sensors(CABINET_ID, "71", "70", "")
+        health = agents.hub.health(CABINET_ID)["agent_health"]
+        self.assertEqual(health["cpu_temp"], 71)
+        # ...but a field only the page has is not wiped by a poll without it.
+        self.assertEqual(health["fan_percent"], 30)
+        self.assertEqual(health["hdd_free"], "116.7 GB free")

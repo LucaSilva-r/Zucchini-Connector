@@ -12,7 +12,9 @@
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import ConfigPanel from "$lib/components/ConfigPanel.svelte";
+  import ConsoleHealth from "$lib/components/ConsoleHealth.svelte";
   import GameSwitcher from "$lib/components/GameSwitcher.svelte";
+  import ItaikoSettings from "$lib/components/ItaikoSettings.svelte";
   import ManagementGate from "$lib/components/ManagementGate.svelte";
   import RemoteControl from "$lib/components/RemoteControl.svelte";
   import SongSelection from "$lib/components/SongSelection.svelte";
@@ -226,6 +228,8 @@
         <Tabs.Trigger value="songs">Library</Tabs.Trigger>
         {#if cabinet.agent_ever}<Tabs.Trigger value="games">Games</Tabs.Trigger>{/if}
         <Tabs.Trigger value="control">Control</Tabs.Trigger>
+        {#if cabinet.agent_ever}<Tabs.Trigger value="console">Console</Tabs.Trigger>{/if}
+        <Tabs.Trigger value="itaiko">Drum</Tabs.Trigger>
         <Tabs.Trigger value="config">Config</Tabs.Trigger>
         <Tabs.Trigger value="update">Update</Tabs.Trigger>
       </Tabs.List>
@@ -235,6 +239,8 @@
       <Tabs.Content value="songs">{#if tab === "songs"}<SongSelection {token} {cabinet} {library} onSaved={onUpdated} />{/if}</Tabs.Content>
       <Tabs.Content value="games">{#if tab === "games"}<ManagementGate><GameSwitcher {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="control">{#if tab === "control"}<ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
+      <Tabs.Content value="console">{#if tab === "console"}<ConsoleHealth {cabinet} />{/if}</Tabs.Content>
+      <Tabs.Content value="itaiko">{#if tab === "itaiko"}<ManagementGate><ItaikoSettings {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="config">{#if tab === "config"}<ManagementGate><ConfigPanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="update">{#if tab === "update"}<ManagementGate><UpdatePanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
     </Tabs.Root>
