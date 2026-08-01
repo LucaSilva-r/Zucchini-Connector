@@ -171,6 +171,21 @@ waits for XMB's loader and selects the requested directory through Sony's stock
 `game_ext_plugin` launch pipeline. This remains unambiguous when multiple Taiko
 revisions share `SCEEXE001`.
 
+The **Files** tab is a file manager over the same channel. It lists any
+directory on the console and downloads any file out of it — both hold the
+operator's request open until the cabinet answers, since delivery rides on the
+held poll. It also replaces exactly three files: the Taiko plugin
+(`plugins/taiko/zucchini.sprx`), its config (`plugins/taiko/taiko_config.cfg`),
+and the VSH agent itself (`plugins/zucchini_agent.sprx`).
+
+The connector never sends a destination path — only one of those three kinds
+(`agents.PUSH_KINDS`), with the paths living in the agent's own table. The
+agent's config is in neither table on purpose: it holds the connector address
+and the token used to reach it, so a bad push there would sever the one link
+left for fixing a broken cabinet. Both sides check the `SCE\0` header before an
+SPRX is installed, and the console renames it into place only once the whole
+file has arrived.
+
 - **Transport**: outbound only, so cabinets behind NAT need no forwarding.
   webMAN has no TLS, so this route gets its **own plain-HTTP listener** on
   `AGENT_PORT` (default 8080) serving only authenticated `/api/agent/*` routes

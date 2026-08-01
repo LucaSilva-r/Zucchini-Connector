@@ -200,6 +200,63 @@ export const launchInstalledGame = (token: string, cabinetId: string, directory:
     body: JSON.stringify({ directory }),
   });
 
+export type ConsoleEntry = { name: string; directory: boolean; size: number; mtime: number };
+export type ConsoleListing = { path: string; entries: ConsoleEntry[]; error: boolean; truncated: boolean };
+
+/** Browse one directory on the console. The request is held open until the
+ *  cabinet answers over its poll, so it is slower than a normal call. */
+export const listConsoleDirectory = (token: string, cabinetId: string, path: string) =>
+  apiRequest<ConsoleListing>(token, `/cabinets/${cabinetId}/fs/list`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+
+/** Pull one file off the console and save it. The connector holds the request
+ *  while the cabinet uploads, so the browser gets the bytes in one go. */
+export async function downloadConsoleFile(token: string, cabinetId: string, path: string) {
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  headers.set("Content-Type", "application/json");
+  const response = await fetch(`/api/ui/cabinets/${cabinetId}/fs/fetch`, {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) {
+    let detail = `Download failed (${response.status})`;
+    try {
+      detail = String((await response.json()).detail ?? detail);
+    } catch {
+      // Keep the status-based message.
+    }
+    throw new ApiError(response.status, detail);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = path.split("/").pop() || "download.bin";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** The three files a cabinet will accept. Not a path: the destination lives
+ *  in the agent's own table, and the agent's config is not in it. */
+export type PushKind = "agent" | "mod" | "config";
+
+export const pushConsoleFile = (token: string, cabinetId: string, kind: PushKind, file: File) => {
+  const body = new FormData();
+  body.append("kind", kind);
+  body.append("file", file, file.name);
+  return apiRequest<{ status: string; kind: string; bytes: number }>(
+    token,
+    `/cabinets/${cabinetId}/fs/push`,
+    { method: "POST", body },
+  );
+};
+
 export const resyncCabinet = (token: string, cabinetId: string) =>
   apiRequest<Cabinet>(token, `/cabinets/${cabinetId}/resync`, { method: "POST" });
 

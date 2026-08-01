@@ -27,6 +27,20 @@ POLL_HOLD_SECONDS = 25
 # missed polls, so one lost round trip does not flap the UI.
 PRESENCE_SECONDS = POLL_HOLD_SECONDS * 2 + 10
 MAX_INSTALLED_GAMES = 256
+MAX_DIR_ENTRIES = 4096
+# One pulled file. Matches ZU_FS_GET_MAX / ZU_FS_PUT_MAX in the agent.
+MAX_PULL_BYTES = 64 * 1024 * 1024
+MAX_PUSH_BYTES = 32 * 1024 * 1024
+
+# The only three files the connector may replace on a cabinet, and whether
+# each one has to be a signed SELF. This mirrors g_push_targets in the agent,
+# which is where the destination paths actually live — the connector never
+# sends a path, only one of these names.
+#
+# The agent's own config is deliberately not here and not there: it holds the
+# connector address and the token used to reach it, so a bad push to it is the
+# one mistake that could not then be undone remotely.
+PUSH_KINDS: dict[str, bool] = {"agent": True, "mod": True, "config": False}
 DEFAULT_SENSORS = {"cpu_temp": 0, "rsx_temp": 0, "fan_percent": 0}
 MAX_HEALTH_BYTES = 64 * 1024
 # What the operator sees when the parser found nothing it recognised.
@@ -111,6 +125,89 @@ def parse_games_report(body: bytes) -> dict[str, object]:
         "autoboot_dir": autoboot,
         "autoboot_delay": delay,
     }
+
+
+def validate_console_path(path: str) -> str:
+    """One absolute path on the console, as the agent will accept it.
+
+    Read-side only; the write side never takes a path. `..` is refused rather
+    than resolved, which also rejects a legitimate name containing two dots in
+    a row — nothing on a PS3 is named that way, and the agent applies the same
+    rule, so agreeing with it is worth more than the extra reach.
+    """
+    if (
+        not path.startswith("/")
+        or len(path.encode("utf-8")) >= 448
+        or ".." in path
+        or any(ord(c) < 0x20 or ord(c) == 0x7F for c in path)
+    ):
+        raise ValueError("Invalid console path")
+    return path
+
+
+def list_command(path: str) -> str:
+    return "ls\t" + quote(validate_console_path(path), safe="")
+
+
+def fetch_command(path: str) -> str:
+    return "get\t" + quote(validate_console_path(path), safe="")
+
+
+def push_command(kind: str) -> str:
+    if kind not in PUSH_KINDS:
+        raise ValueError("Unknown push target")
+    return "put\t" + kind
+
+
+def parse_dir_report(body: bytes) -> dict[str, object]:
+    """Parse the agent's escaped directory listing.
+
+    Line-oriented like the installed-game report, and for the same reason:
+    the console has no JSON writer.
+
+      version=1
+      path=<escaped>
+      d|f<TAB>name<TAB>size<TAB>mtime
+      error=1 / truncated=1
+    """
+    if not body or len(body) > 64 * 1024:
+        raise ValueError("Bad directory listing size")
+    text = body.decode("utf-8", errors="strict")
+    protocol = 0
+    path = ""
+    failed = False
+    truncated = False
+    entries: list[dict[str, object]] = []
+
+    for raw in text.splitlines():
+        if raw.startswith("version="):
+            protocol = int(raw.removeprefix("version=") or "0")
+        elif raw.startswith("path="):
+            path = unquote(raw.removeprefix("path="))
+        elif raw == "error=1":
+            failed = True
+        elif raw == "truncated=1":
+            truncated = True
+        elif raw[:2] in ("d\t", "f\t"):
+            fields = raw.split("\t")
+            if len(fields) != 4 or len(entries) >= MAX_DIR_ENTRIES:
+                raise ValueError("Malformed directory entry")
+            name = unquote(fields[1])[:256]
+            if not name or "/" in name:
+                raise ValueError("Malformed directory entry")
+            entries.append(
+                {
+                    "name": name,
+                    "directory": fields[0] == "d",
+                    "size": int(fields[2] or 0),
+                    "mtime": int(fields[3] or 0),
+                }
+            )
+
+    if protocol != 1:
+        raise ValueError("Unsupported directory listing version")
+    entries.sort(key=lambda entry: (not entry["directory"], str(entry["name"]).casefold()))
+    return {"path": path, "entries": entries, "error": failed, "truncated": truncated}
 
 
 def health_text(body: bytes) -> str:
@@ -200,6 +297,11 @@ class AgentHub:
         self._seen: dict[str, tuple[float, str]] = {}
         self._sensors: dict[str, dict[str, int]] = {}
         self._health: dict[str, dict[str, object]] = {}
+        # File-manager replies, keyed by (cabinet, verb). One slot per verb:
+        # ponytail: two operators driving the same cabinet's file manager at
+        # once would collide, which is a queue away if it ever matters.
+        self._results: dict[tuple[str, str], object] = {}
+        self._result_events: dict[tuple[str, str], asyncio.Event] = {}
 
     def _event(self, cabinet_id: str) -> asyncio.Event:
         event = self._wakeups.get(cabinet_id)
@@ -257,6 +359,34 @@ class AgentHub:
         if not self.online(cabinet_id):
             print(f"[connector] webMAN agent online: {cabinet_id} ({state})", flush=True)
         self._seen[cabinet_id] = (time.time(), state[:16])
+
+    def arm(self, cabinet_id: str, verb: str) -> None:
+        """Drop any stale reply and get ready for a new one.
+
+        Called before the command is queued, never after: the agent can answer
+        before the enqueueing request has resumed.
+        """
+        slot = (cabinet_id, verb)
+        self._results.pop(slot, None)
+        self._result_events.setdefault(slot, asyncio.Event()).clear()
+
+    def note_result(self, cabinet_id: str, verb: str, value: object) -> None:
+        slot = (cabinet_id, verb)
+        self._results[slot] = value
+        event = self._result_events.get(slot)
+        if event is not None:
+            event.set()
+
+    async def collect(self, cabinet_id: str, verb: str, timeout: float) -> object | None:
+        """The agent's reply to an armed command, or None if it never came."""
+        slot = (cabinet_id, verb)
+        event = self._result_events.get(slot)
+        if event is not None and not event.is_set():
+            try:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return None
+        return self._results.pop(slot, None)
 
     def enqueue(self, cabinet_id: str, path: str) -> bool:
         """Queue one web command. False when no agent is polling for it.

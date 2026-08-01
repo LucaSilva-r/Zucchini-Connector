@@ -210,6 +210,217 @@ async def agent_upload(request: Request, id: str = "", kind: str = "") -> dict[s
     return {"status": "stored", "bytes": len(body)}
 
 
+# ----------------------------------------------------------------------
+# File manager
+#
+# The console answers over the same held poll as every other agent verb, so
+# these UI routes are synchronous from the operator's side and hold their
+# request until the cabinet replies. The agent executes one command at a
+# time, so a large pull blocks the next one until it finishes.
+# ----------------------------------------------------------------------
+
+FS_LIST_TIMEOUT = 45
+FS_TRANSFER_TIMEOUT = 300
+
+
+def _safe_id(cabinet_id: str) -> str:
+    return "".join(c for c in cabinet_id if c.isalnum() or c in "-_")
+
+
+def _pull_path(cabinet_id: str) -> Path:
+    """Where the last file pulled off this cabinet lands. One slot: the
+    operator's request is still waiting on it when it arrives."""
+    return settings.cabinets_root / "uploads" / _safe_id(cabinet_id) / "pull.bin"
+
+
+def _push_path(cabinet_id: str, kind: str) -> Path:
+    if kind not in agents.PUSH_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown push target")
+    return settings.cabinets_root / "uploads" / _safe_id(cabinet_id) / f"push-{kind}.bin"
+
+
+async def _stream_to_file(request: Request, path: Path, limit: int) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    total = 0
+    try:
+        with tmp.open("wb") as fh:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(status_code=413, detail="File too large")
+                fh.write(chunk)
+        await asyncio.to_thread(os.replace, tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return total
+
+
+@agent_api.post("/dir", dependencies=[Depends(require_agent_token)])
+async def agent_dir(request: Request, id: str = "") -> dict[str, object]:
+    """Receive one directory listing the agent was asked for."""
+    if not id:
+        raise HTTPException(status_code=400, detail="Cabinet id required")
+    try:
+        report = agents.parse_dir_report(await request.body())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    agents.hub.note_result(id, "ls", report)
+    return {"status": "stored", "entries": len(report["entries"])}
+
+
+@agent_api.post("/file", dependencies=[Depends(require_agent_token)])
+async def agent_file(
+    request: Request, id: str = "", path: str = "", error: str = ""
+) -> dict[str, object]:
+    """Receive one file the agent read off the console.
+
+    `error=1` with an empty body is the agent saying it could not open the
+    path, so the operator gets an answer instead of a timeout. `path` is
+    optional and only ever a label — the request still waiting on this file is
+    the one that asked for it, and it kept the path it sent.
+    """
+    if not id:
+        raise HTTPException(status_code=400, detail="Cabinet id required")
+    if error:
+        agents.hub.note_result(id, "get", {"path": path, "error": True})
+        return {"status": "noted"}
+    size = await _stream_to_file(request, _pull_path(id), agents.MAX_PULL_BYTES)
+    agents.hub.note_result(id, "get", {"path": path, "size": size, "error": False})
+    return {"status": "stored", "bytes": size}
+
+
+@agent_api.get("/blob", dependencies=[Depends(require_agent_token)])
+def agent_blob(id: str = "", kind: str = "") -> Response:
+    """Serve the staged file for a `put`. The agent asks by kind, never by
+    path — the destinations live in the agent's own table."""
+    path = _push_path(id, kind)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Nothing staged for that cabinet")
+    return FileResponse(path, media_type="application/octet-stream")
+
+
+@agent_api.post("/blob", dependencies=[Depends(require_agent_token)])
+def agent_blob_result(
+    id: str = "", kind: str = "", ok: str = "", size: str = ""
+) -> dict[str, object]:
+    """The agent reporting whether the install actually happened."""
+    agents.hub.note_result(
+        id,
+        "put",
+        {"kind": kind, "ok": ok == "1", "size": int(size) if size.isdigit() else 0},
+    )
+    return {"status": "noted"}
+
+
+@ui_api.post("/cabinets/{cabinet_id}/fs/list", dependencies=[Depends(auth.require_management)])
+async def cabinet_fs_list(
+    cabinet_id: str, path: str = Body(default="/dev_hdd0", embed=True)
+) -> dict[str, object]:
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    try:
+        command = agents.list_command(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    agents.hub.arm(cabinet_id, "ls")
+    if not agents.hub.enqueue(cabinet_id, command):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    report = await agents.hub.collect(cabinet_id, "ls", FS_LIST_TIMEOUT)
+    if report is None:
+        raise HTTPException(status_code=504, detail="The cabinet did not answer")
+    if report["error"]:
+        raise HTTPException(status_code=404, detail="No such directory on the console")
+    return report
+
+
+@ui_api.post("/cabinets/{cabinet_id}/fs/fetch", dependencies=[Depends(auth.require_management)])
+async def cabinet_fs_fetch(cabinet_id: str, path: str = Body(embed=True)) -> Response:
+    """Pull one file off the console and hand it straight to the browser."""
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    try:
+        command = agents.fetch_command(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    agents.hub.arm(cabinet_id, "get")
+    if not agents.hub.enqueue(cabinet_id, command):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    result = await agents.hub.collect(cabinet_id, "get", FS_TRANSFER_TIMEOUT)
+    if result is None:
+        raise HTTPException(status_code=504, detail="The cabinet did not answer")
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail="The console could not read that file")
+    return FileResponse(
+        _pull_path(cabinet_id),
+        media_type="application/octet-stream",
+        filename=path.rsplit("/", 1)[-1] or "download.bin",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _stage_push(upload: UploadFile, path: Path, require_self: bool) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    total = 0
+    first = b""
+    try:
+        with tmp.open("wb") as fh:
+            while chunk := await upload.read(256 * 1024):
+                total += len(chunk)
+                if total > agents.MAX_PUSH_BYTES:
+                    raise ValueError("File exceeds the 32 MiB push limit")
+                if len(first) < 4:
+                    first = (first + chunk)[:4]
+                fh.write(chunk)
+        if not total:
+            raise ValueError("File is empty")
+        # The agent checks this too, on the side that would have to be
+        # recovered by hand — an unsigned "SPRX" pushed over the agent itself
+        # is the one failure with no way back in.
+        if require_self and first != b"SCE\0":
+            raise ValueError("Not a signed PS3 SELF/SPRX (missing SCE header)")
+        await asyncio.to_thread(os.replace, tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return total
+
+
+@ui_api.post("/cabinets/{cabinet_id}/fs/push", dependencies=[Depends(auth.require_management)])
+async def cabinet_fs_push(
+    cabinet_id: str, kind: str = Form(...), file: UploadFile = File(...)
+) -> dict[str, object]:
+    """Replace one of the three files a cabinet will accept.
+
+    `kind` is never a path: agents.PUSH_KINDS and the agent's own table decide
+    where each one lands, and the agent's config is in neither.
+    """
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if kind not in agents.PUSH_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown push target")
+    staged = _push_path(cabinet_id, kind)
+    try:
+        size = await _stage_push(file, staged, agents.PUSH_KINDS[kind])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    agents.hub.arm(cabinet_id, "put")
+    if not agents.hub.enqueue(cabinet_id, agents.push_command(kind)):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    result = await agents.hub.collect(cabinet_id, "put", FS_TRANSFER_TIMEOUT)
+    if result is None:
+        raise HTTPException(status_code=504, detail="The cabinet did not answer")
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail="The console refused the file")
+    print(f"[connector] pushed {kind} to {cabinet_id}: {size} bytes", flush=True)
+    return {"status": "installed", "kind": kind, "bytes": size}
+
+
 @cabinet_api.post("/cabinet/screenshot", dependencies=[Depends(require_token)])
 async def cabinet_screenshot_upload(request: Request, id: str = "") -> dict[str, object]:
     """In-game capture, uploaded by the plugin over its own TLS socket."""

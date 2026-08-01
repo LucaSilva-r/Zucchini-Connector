@@ -14,6 +14,7 @@
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import ConfigPanel from "$lib/components/ConfigPanel.svelte";
   import ConsoleHealth from "$lib/components/ConsoleHealth.svelte";
+  import FileManager from "$lib/components/FileManager.svelte";
   import GameSwitcher from "$lib/components/GameSwitcher.svelte";
   import ItaikoSettings from "$lib/components/ItaikoSettings.svelte";
   import ManagementGate from "$lib/components/ManagementGate.svelte";
@@ -47,7 +48,7 @@
      plugged in, so unplugging the last drum must not strand the view on it. */
   $effect(() => {
     if (tab === "itaiko" && !cabinet.itaiko.length) tab = "songs";
-    if (!cabinet.agent_ever && (tab === "games" || tab === "console")) tab = "songs";
+    if (!cabinet.agent_ever && (tab === "games" || tab === "console" || tab === "files")) tab = "songs";
   });
 
   function eventUrl(id: string) {
@@ -250,6 +251,7 @@
         {#if cabinet.agent_ever}
           <Tabs.Trigger value="games" class={AGENT_TAB}><PlugZapIcon class="size-3.5" /> Games</Tabs.Trigger>
           <Tabs.Trigger value="console" class={AGENT_TAB}><PlugZapIcon class="size-3.5" /> Console</Tabs.Trigger>
+          <Tabs.Trigger value="files" class={AGENT_TAB}><PlugZapIcon class="size-3.5" /> Files</Tabs.Trigger>
         {/if}
       </Tabs.List>
       <!-- bits-ui renders inactive tab panels too, so each one is mounted
@@ -259,6 +261,7 @@
       <Tabs.Content value="games">{#if tab === "games"}<ManagementGate><GameSwitcher {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="control">{#if tab === "control"}<ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="console">{#if tab === "console"}<ManagementGate><ConsoleHealth {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
+      <Tabs.Content value="files">{#if tab === "files"}<ManagementGate><FileManager {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="itaiko">{#if tab === "itaiko"}<ManagementGate><ItaikoSettings {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="config">{#if tab === "config"}<ManagementGate><ConfigPanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="update">{#if tab === "update"}<ManagementGate><UpdatePanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
