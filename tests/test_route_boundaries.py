@@ -30,8 +30,8 @@ class RouteBoundaryTests(unittest.TestCase):
             ("POST", "/api/ui/library/upload/osz"),
             ("PUT", "/api/ui/cabinets/{cabinet_id}/selection"),
             ("PUT", "/api/ui/cabinets/{cabinet_id}/config"),
-            ("POST", "/api/ui/cabinets/{cabinet_id}/itaiko/read"),
-            ("PUT", "/api/ui/cabinets/{cabinet_id}/itaiko/settings"),
+            ("POST", "/api/ui/cabinets/{cabinet_id}/itaiko/{index}/read"),
+            ("PUT", "/api/ui/cabinets/{cabinet_id}/itaiko/{index}/settings"),
         }
         self.assertLessEqual(expected_ui_routes, routes)
 

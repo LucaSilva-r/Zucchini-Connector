@@ -1,5 +1,6 @@
 <script lang="ts">
   import CircleCheckIcon from "@lucide/svelte/icons/circle-check";
+  import PlugZapIcon from "@lucide/svelte/icons/plug-zap";
   import Clock3Icon from "@lucide/svelte/icons/clock-3";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import RadioIcon from "@lucide/svelte/icons/radio";
@@ -32,10 +33,22 @@
 
   let deleting = $state(false);
   let forgetOpen = $state(false);
+  // Tabs that only exist because a VSH agent is installed on that console,
+  // tinted so it is obvious which features carry that requirement.
+  const AGENT_TAB =
+    "text-sky-700 data-[state=active]:text-sky-700 dark:text-sky-400 dark:data-[state=active]:text-sky-300";
+
   let tab = $state("songs");
   let deleteError = $state("");
   let resyncing = $state(false);
   const liveCabinetId = $derived(cabinet.cabinet_id);
+
+  /* Not every cabinet has ITAIKO drums: the tab exists only while one is
+     plugged in, so unplugging the last drum must not strand the view on it. */
+  $effect(() => {
+    if (tab === "itaiko" && !cabinet.itaiko.length) tab = "songs";
+    if (!cabinet.agent_ever && (tab === "games" || tab === "console")) tab = "songs";
+  });
 
   function eventUrl(id: string) {
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -226,12 +239,18 @@
     <Tabs.Root bind:value={tab}>
       <Tabs.List class="mb-3 max-w-full">
         <Tabs.Trigger value="songs">Library</Tabs.Trigger>
-        {#if cabinet.agent_ever}<Tabs.Trigger value="games">Games</Tabs.Trigger>{/if}
         <Tabs.Trigger value="control">Control</Tabs.Trigger>
-        {#if cabinet.agent_ever}<Tabs.Trigger value="console">Console</Tabs.Trigger>{/if}
-        <Tabs.Trigger value="itaiko">Drum</Tabs.Trigger>
+        {#if cabinet.itaiko.length}<Tabs.Trigger value="itaiko">Drum</Tabs.Trigger>{/if}
         <Tabs.Trigger value="config">Config</Tabs.Trigger>
         <Tabs.Trigger value="update">Update</Tabs.Trigger>
+        <!-- Last, and tinted: these two are the only tabs that need the VSH
+             agent on the console. Sticky once one has been seen, so they do
+             not vanish while the agent is merely offline — but a cabinet that
+             never had one (RPCS3, no plugin) is not shown dead tabs. -->
+        {#if cabinet.agent_ever}
+          <Tabs.Trigger value="games" class={AGENT_TAB}><PlugZapIcon class="size-3.5" /> Games</Tabs.Trigger>
+          <Tabs.Trigger value="console" class={AGENT_TAB}><PlugZapIcon class="size-3.5" /> Console</Tabs.Trigger>
+        {/if}
       </Tabs.List>
       <!-- bits-ui renders inactive tab panels too, so each one is mounted
            only while selected: the controller must not hold a socket (or the
@@ -239,7 +258,7 @@
       <Tabs.Content value="songs">{#if tab === "songs"}<SongSelection {token} {cabinet} {library} onSaved={onUpdated} />{/if}</Tabs.Content>
       <Tabs.Content value="games">{#if tab === "games"}<ManagementGate><GameSwitcher {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="control">{#if tab === "control"}<ManagementGate><RemoteControl {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
-      <Tabs.Content value="console">{#if tab === "console"}<ConsoleHealth {cabinet} />{/if}</Tabs.Content>
+      <Tabs.Content value="console">{#if tab === "console"}<ManagementGate><ConsoleHealth {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="itaiko">{#if tab === "itaiko"}<ManagementGate><ItaikoSettings {token} {cabinet} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="config">{#if tab === "config"}<ManagementGate><ConfigPanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>
       <Tabs.Content value="update">{#if tab === "update"}<ManagementGate><UpdatePanel {token} {cabinet} onSaved={onUpdated} /></ManagementGate>{/if}</Tabs.Content>

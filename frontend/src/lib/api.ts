@@ -105,17 +105,18 @@ export const saveConfig = (token: string, cabinetId: string, config: Record<stri
     body: JSON.stringify({ config }),
   });
 
-export const readItaikoSettings = (token: string, cabinetId: string) =>
-  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/itaiko/read`, {
+export const readItaikoSettings = (token: string, cabinetId: string, index: number) =>
+  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/itaiko/${index}/read`, {
     method: "POST",
   });
 
 export const saveItaikoSettings = (
   token: string,
   cabinetId: string,
+  index: number,
   itaikoSettings: Record<string, number>,
 ) =>
-  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/itaiko/settings`, {
+  apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/itaiko/${index}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ itaiko_settings: itaikoSettings }),

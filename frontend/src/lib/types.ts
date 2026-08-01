@@ -67,13 +67,19 @@ export type Cabinet = {
   update_error: string;
   control_online: boolean;
   control_operator: boolean;
-  itaiko: ItaikoStatus;
+  itaiko: ItaikoDevice[];
 };
 
-export type ItaikoStatus = {
+/* One entry per ITAIKO drum the cabinet has plugged in, in USB attach order.
+   Empty on cabinets without ITAIKO hardware, which is what hides the panel. */
+export type ItaikoDevice = {
+  index: number;
   state: "disconnected" | "busy" | "ready" | "error";
   version: string;
   edition: string;
+  /* Firmware USB mode token, e.g. KEYBOARD_P1 — which player this drum drives.
+     Empty on firmware that predates the report. */
+  mode: string;
   settings: Record<string, number>;
   error: string;
 };

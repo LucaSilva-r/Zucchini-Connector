@@ -674,29 +674,35 @@ async def cabinet_exit(cabinet_id: str) -> dict[str, str]:
 
 
 @ui_api.post(
-    "/cabinets/{cabinet_id}/itaiko/read",
+    "/cabinets/{cabinet_id}/itaiko/{index}/read",
     dependencies=[Depends(auth.require_management)],
 )
-async def cabinet_itaiko_read(cabinet_id: str) -> dict[str, str]:
+async def cabinet_itaiko_read(cabinet_id: str, index: int) -> dict[str, str]:
     if cabinets.load(cabinet_id) is None:
         raise HTTPException(status_code=404, detail="Cabinet not found")
-    if not await control.hub.request_itaiko_read(cabinet_id):
+    try:
+        sent = await control.hub.request_itaiko_read(cabinet_id, index)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not sent:
         raise HTTPException(status_code=409, detail="Cabinet is not connected")
     return {"status": "requested"}
 
 
 @ui_api.put(
-    "/cabinets/{cabinet_id}/itaiko/settings",
+    "/cabinets/{cabinet_id}/itaiko/{index}/settings",
     dependencies=[Depends(auth.require_management)],
 )
 async def cabinet_itaiko_settings(
-    cabinet_id: str, itaiko_settings: dict[str, object] = Body(embed=True)
+    cabinet_id: str,
+    index: int,
+    itaiko_settings: dict[str, object] = Body(embed=True),
 ) -> dict[str, str]:
     if cabinets.load(cabinet_id) is None:
         raise HTTPException(status_code=404, detail="Cabinet not found")
     try:
         sent = await control.hub.request_itaiko_settings(
-            cabinet_id, itaiko_settings
+            cabinet_id, index, itaiko_settings
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

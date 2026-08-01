@@ -1,8 +1,11 @@
 <script lang="ts">
   import ThermometerIcon from "@lucide/svelte/icons/thermometer";
+  import { runWebmanAction, type WebmanAction } from "$lib/api.js";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
   import type { Cabinet } from "$lib/types.js";
 
-  let { cabinet }: { cabinet: Cabinet } = $props();
+  let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
 
   // Relayed from webMAN's own info page every ~2 min, with the poll's
   // temperatures laid over it. Every field is optional: an edition that
@@ -23,6 +26,45 @@
     ].filter(([, value]) => value) as [string, string, boolean][],
   );
   const age = $derived(health.updated_at ? Math.max(0, Math.round(Date.now() / 1000 - health.updated_at)) : 0);
+
+  // webMAN runs on the console itself, so these keep working after the game
+  // process is gone — which is the point of restart_game.
+  const WEBMAN_LABELS: Record<WebmanAction, { label: string; confirm: string }> = {
+    restart_game: {
+      label: "Restart game",
+      confirm:
+        "Closes the game, waits for XMB and presses X on the game icon to launch it again. Any credit or play in progress is lost. This is how a downloaded plugin update gets applied without a site visit.",
+    },
+    exit_game: {
+      label: "Exit to XMB",
+      confirm:
+        "Closes the game and leaves the cabinet on XMB. It stops answering this connector until the game runs again.",
+    },
+    reboot: {
+      label: "Reboot console",
+      confirm:
+        "Soft-reboots the PS3. The cabinet is offline until it boots and the game auto-starts.",
+    },
+  };
+  let pending = $state<WebmanAction | null>(null);
+  let busy = $state(false);
+  let error = $state("");
+  let notice = $state("");
+  let open = $state(false);
+
+  async function runWebman(action: WebmanAction) {
+    busy = true;
+    error = "";
+    try {
+      await runWebmanAction(token, cabinet.cabinet_id, action);
+      notice = `${WEBMAN_LABELS[action].label} sent to the console.`;
+      pending = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <div class="grid gap-4">
@@ -65,4 +107,60 @@
       </details>
     {/if}
   </div>
+
+  <!-- Kept behind a fold even on its own tab: these are the only controls here
+       that a mis-click cannot be walked back from. -->
+  <details bind:open class="rounded-lg border border-destructive/40 bg-destructive/5">
+    <summary class="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
+      Console control (webMAN) — dangerous
+    </summary>
+    <div class="grid gap-3 border-t border-destructive/30 p-3">
+      <p class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <strong>These act on the PS3 itself, not on the game.</strong> They end any credit or play in progress immediately, and a cabinet
+        that fails to come back needs someone physically at the machine. Use them when you can watch the result, not blind.
+      </p>
+      <p class="text-xs text-muted-foreground">
+        {#if cabinet.agent_online}
+          webMAN agent connected ({cabinet.agent_state === "game" ? "in game" : "on XMB"}). These keep working when the game is closed, which is
+          what makes an unattended plugin update possible.
+        {:else}
+          Agent offline — the console is powered down, or the VSH plugin is not running. These will fail until it polls again.
+        {/if}
+      </p>
+
+      <div class="flex flex-wrap items-center gap-2">
+        {#each Object.keys(WEBMAN_LABELS) as action (action)}
+          <Button
+            variant="outline"
+            size="sm"
+            class="border-destructive/40 text-destructive hover:bg-destructive/10"
+            disabled={!cabinet.agent_online || busy}
+            onclick={() => { error = ""; pending = action as WebmanAction; }}
+          >
+            {WEBMAN_LABELS[action as WebmanAction].label}
+          </Button>
+        {/each}
+      </div>
+    </div>
+  </details>
+
+  <AlertDialog.Root open={pending !== null} onOpenChange={(isOpen) => { if (!isOpen) pending = null; }}>
+    <AlertDialog.Content>
+      {#if pending}
+        <AlertDialog.Header>
+          <AlertDialog.Title>{WEBMAN_LABELS[pending].label} on {cabinet.name || cabinet.cabinet_id}?</AlertDialog.Title>
+          <AlertDialog.Description>{WEBMAN_LABELS[pending].confirm}</AlertDialog.Description>
+        </AlertDialog.Header>
+        {#if error}<p class="text-sm text-destructive">{error}</p>{/if}
+        <AlertDialog.Footer>
+          <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+          <AlertDialog.Action variant="destructive" disabled={busy} onclick={() => runWebman(pending!)}>
+            {busy ? "Sending…" : "Run it"}
+          </AlertDialog.Action>
+        </AlertDialog.Footer>
+      {/if}
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+
+  {#if notice}<p class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">{notice}</p>{/if}
 </div>

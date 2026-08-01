@@ -51,6 +51,10 @@ ITAIKO_SETTING_LIMITS = {
     46: 50,
 }
 ITAIKO_STATES = {"disconnected", "busy", "ready", "error"}
+# One drum per player. The cabinet numbers them in USB attach order and
+# addresses them by that index; a cabinet with no ITAIKO drum simply never
+# reports one, which is what hides the panel.
+ITAIKO_MAX_DEVICES = 2
 
 
 def _token_ok(candidate: str) -> bool:
@@ -64,7 +68,7 @@ class ControlHub:
         self._cabinets: dict[str, WebSocket] = {}
         self._operators: dict[str, WebSocket] = {}
         self._viewers: dict[str, set[WebSocket]] = {}
-        self._itaiko: dict[str, dict[str, object]] = {}
+        self._itaiko: dict[str, dict[int, dict[str, object]]] = {}
 
     def status(self, cabinet_id: str) -> dict[str, bool]:
         with self._lock:
@@ -81,18 +85,10 @@ class ControlHub:
         """
         cabinet_id = str(cabinet.get("cabinet_id") or "")
         with self._lock:
-            itaiko = dict(
-                self._itaiko.get(
-                    cabinet_id,
-                    {
-                        "state": "disconnected",
-                        "version": "",
-                        "edition": "",
-                        "settings": {},
-                        "error": "",
-                    },
-                )
-            )
+            drums = self._itaiko.get(cabinet_id, {})
+            itaiko = [
+                {"index": index, **drums[index]} for index in sorted(drums)
+            ]
         return {
             **cabinet,
             **self.status(cabinet_id),
@@ -186,12 +182,23 @@ class ControlHub:
             self._remove(self._cabinets, cabinet_id, cabinet)
             return False
 
-    async def request_itaiko_read(self, cabinet_id: str) -> bool:
+    @staticmethod
+    def validate_itaiko_device(index: object) -> int:
+        try:
+            device = int(index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid drum index") from exc
+        if device < 0 or device >= ITAIKO_MAX_DEVICES:
+            raise ValueError("Invalid drum index")
+        return device
+
+    async def request_itaiko_read(self, cabinet_id: str, index: object) -> bool:
+        device = self.validate_itaiko_device(index)
         cabinet = self._get(self._cabinets, cabinet_id)
         if cabinet is None:
             return False
         try:
-            await cabinet.send_text("I GET\n")
+            await cabinet.send_text(f"I GET {device}\n")
             return True
         except RuntimeError:
             self._remove(self._cabinets, cabinet_id, cabinet)
@@ -228,22 +235,23 @@ class ControlHub:
         return normalized
 
     async def request_itaiko_settings(
-        self, cabinet_id: str, settings_value: object
+        self, cabinet_id: str, index: object, settings_value: object
     ) -> bool:
+        device = self.validate_itaiko_device(index)
         normalized = self.validate_itaiko_settings(settings_value)
         cabinet = self._get(self._cabinets, cabinet_id)
         if cabinet is None:
             return False
         pairs = " ".join(f"{key}:{normalized[key]}" for key in sorted(normalized))
         try:
-            await cabinet.send_text(f"I SET {pairs}\n")
+            await cabinet.send_text(f"I SET {device} {pairs}\n")
             return True
         except RuntimeError:
             self._remove(self._cabinets, cabinet_id, cabinet)
             return False
 
     @staticmethod
-    def _parse_itaiko_frame(frame: str) -> tuple[str, dict[str, object]]:
+    def _parse_itaiko_frame(frame: str) -> tuple[str, int, dict[str, object]]:
         fields: dict[str, str] = {}
         for line in frame.splitlines():
             if "=" not in line:
@@ -255,10 +263,17 @@ class ControlHub:
         state = fields.get("state", "")
         if state not in ITAIKO_STATES:
             raise ValueError("Invalid ITAIKO state")
+        # A plugin that predates per-drum addressing reports a single drum
+        # and no `dev` line; treat it as drum 0 rather than dropping the
+        # cabinet's socket over a missing field.
+        device = ControlHub.validate_itaiko_device(fields.get("dev", "0"))
         version = fields.get("version", "")
         edition = fields.get("edition", "")
+        # Which player the drum is wired to: identical drums are
+        # indistinguishable over USB, so the firmware reports its USB mode.
+        mode = fields.get("mode", "")
         error = fields.get("error", "")
-        if any(len(value) > 160 for value in (version, edition, error)):
+        if any(len(value) > 160 for value in (version, edition, mode, error)):
             raise ValueError("ITAIKO status field is too long")
         raw_settings: dict[str, int] = {}
         settings_line = fields.get("settings", "")
@@ -273,17 +288,26 @@ class ControlHub:
                 pairs[key] = value
             normalized = ControlHub.validate_itaiko_settings(pairs)
             raw_settings = {str(key): value for key, value in normalized.items()}
-        return fields.get("id", ""), {
+        return fields.get("id", ""), device, {
             "state": state,
             "version": version,
             "edition": edition,
+            "mode": mode,
             "settings": raw_settings,
             "error": error,
         }
 
-    def _set_itaiko(self, cabinet_id: str, value: dict[str, object]) -> None:
+    def _set_itaiko(
+        self, cabinet_id: str, index: int, value: dict[str, object]
+    ) -> None:
         with self._lock:
-            self._itaiko[cabinet_id] = value
+            drums = self._itaiko.setdefault(cabinet_id, {})
+            # An unplugged drum leaves the panel rather than sitting there
+            # greyed out: cabinets without ITAIKO hardware show nothing.
+            if value["state"] == "disconnected":
+                drums.pop(index, None)
+            else:
+                drums[index] = value
 
     async def _operator_status(self, cabinet_id: str, online: bool) -> None:
         operator = self._get(self._operators, cabinet_id)
@@ -373,13 +397,15 @@ class ControlHub:
                             break
                         if is_itaiko:
                             try:
-                                _, itaiko = self._parse_itaiko_frame(frame)
+                                _, device, itaiko = self._parse_itaiko_frame(
+                                    frame
+                                )
                             except ValueError:
                                 await websocket.close(
                                     code=1008, reason="Invalid ITAIKO status"
                                 )
                                 break
-                            self._set_itaiko(cabinet_id, itaiko)
+                            self._set_itaiko(cabinet_id, device, itaiko)
                         else:
                             # Persistent cabinet frames are parsed and written
                             # off-loop; live ITAIKO state stays in memory.
@@ -402,13 +428,11 @@ class ControlHub:
             # here overwrote the new connection's online notice, leaving the
             # operator view stuck at "Cabinet offline" while frames flowed.
             if self._remove(self._cabinets, cabinet_id, websocket):
+                # Drums are live state, not cabinet records: an offline
+                # cabinet reports none, and the plugin re-announces what is
+                # plugged in when it reconnects.
                 with self._lock:
-                    previous = self._itaiko.get(cabinet_id, {})
-                    self._itaiko[cabinet_id] = {
-                        **previous,
-                        "state": "disconnected",
-                        "error": "Cabinet is not connected",
-                    }
+                    self._itaiko.pop(cabinet_id, None)
                 await self._operator_status(cabinet_id, False)
                 await self._broadcast_status(cabinet_id)
 

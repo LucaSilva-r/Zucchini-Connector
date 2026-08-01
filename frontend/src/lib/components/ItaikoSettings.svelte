@@ -8,7 +8,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { Label } from "$lib/components/ui/label/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
-  import type { Cabinet } from "$lib/types.js";
+  import type { Cabinet, ItaikoDevice } from "$lib/types.js";
 
   let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
 
@@ -27,22 +27,64 @@
     { key: 46, name: "Roll boost", help: "Extra hold time during drum rolls", max: 50 },
   ];
 
+  /* Two drums are indistinguishable over USB, so the cabinet reports the
+     firmware's USB mode and that is what names the sides: the left drum runs
+     as keyboard P1, the right as P2. USB attach order is not a side. */
+  function sideLabel(device: ItaikoDevice) {
+    if (device.mode === "KEYBOARD_P1") return "Left drum";
+    if (device.mode === "KEYBOARD_P2") return "Right drum";
+    return `Drum ${device.index + 1}`;
+  }
+
+  function sideOrder(device: ItaikoDevice) {
+    if (device.mode === "KEYBOARD_P1") return 0;
+    if (device.mode === "KEYBOARD_P2") return 1;
+    return 2 + device.index;
+  }
+
+  let selected = $state(0);
   let draft = $state<Record<string, number>>({});
   let dirty = $state(false);
   let loading = $state(false);
   let saving = $state(false);
   let error = $state("");
   let lastSnapshot = "";
+  let lastAutomaticallyReadDevice: number | null = null;
+
+  /* Each drum is configured on its own, so the panel edits exactly one at a
+     time and re-seeds its draft whenever the selection or the cabinet's
+     reported values change. */
+  const devices = $derived([...cabinet.itaiko].sort((a, b) => sideOrder(a) - sideOrder(b)));
+  const device = $derived(devices.find((entry) => entry.index === selected) ?? devices[0]);
+
+  /* Zucchini keeps the last drum report so the cabinet list can render
+     immediately, but the settings editor must start from the controller's
+     current values. Read once when the panel opens, again when another drum
+     is selected, and again after a cabinet reconnect. */
+  $effect(() => {
+    const index = device?.index;
+    if (!cabinet.control_online || index === undefined) {
+      lastAutomaticallyReadDevice = null;
+      return;
+    }
+    if (lastAutomaticallyReadDevice === index) return;
+    lastAutomaticallyReadDevice = index;
+    void refresh();
+  });
 
   $effect(() => {
-    const state = cabinet.itaiko.state;
-    const snapshot = JSON.stringify(cabinet.itaiko.settings);
-    if (snapshot !== lastSnapshot && Object.keys(cabinet.itaiko.settings).length) {
-      draft = { ...cabinet.itaiko.settings };
+    if (!device) {
+      draft = {};
+      lastSnapshot = "";
+      return;
+    }
+    const snapshot = `${device.index}:${JSON.stringify(device.settings)}`;
+    if (snapshot !== lastSnapshot && Object.keys(device.settings).length) {
+      draft = { ...device.settings };
       lastSnapshot = snapshot;
       dirty = false;
     }
-    if (state === "ready" || state === "error" || state === "disconnected") {
+    if (device.state === "ready" || device.state === "error" || device.state === "disconnected") {
       loading = false;
       saving = false;
     }
@@ -59,10 +101,11 @@
   }
 
   async function refresh() {
+    if (!device) return;
     loading = true;
     error = "";
     try {
-      await readItaikoSettings(token, cabinet.cabinet_id);
+      await readItaikoSettings(token, cabinet.cabinet_id, device.index);
     } catch (reason) {
       error = reason instanceof Error ? reason.message : "Could not read ITAIKO settings";
       loading = false;
@@ -70,10 +113,11 @@
   }
 
   async function save() {
+    if (!device) return;
     saving = true;
     error = "";
     try {
-      await saveItaikoSettings(token, cabinet.cabinet_id, draft);
+      await saveItaikoSettings(token, cabinet.cabinet_id, device.index, draft);
     } catch (reason) {
       error = reason instanceof Error ? reason.message : "Could not save ITAIKO settings";
       saving = false;
@@ -81,22 +125,35 @@
   }
 
   const usable = $derived(cabinet.control_online && Object.keys(draft).length > 0);
-  const busy = $derived(cabinet.itaiko.state === "busy" || loading || saving);
+  const busy = $derived(device?.state === "busy" || loading || saving);
 </script>
 
 <div class="grid gap-5">
   <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
     <div>
       <div class="flex flex-wrap items-center gap-2">
-        <h3 class="text-sm font-semibold">ITAIKO drum settings</h3>
+        <h3 class="text-sm font-semibold">{device ? sideLabel(device) : "ITAIKO drum"} settings</h3>
         <Badge
-          variant={cabinet.itaiko.state === "ready" ? "default" : "outline"}
-          class={cabinet.itaiko.state === "ready" ? "bg-emerald-600 hover:bg-emerald-600" : ""}
+          variant={device?.state === "ready" ? "default" : "outline"}
+          class={device?.state === "ready" ? "bg-emerald-600 hover:bg-emerald-600" : ""}
         >
-          {cabinet.itaiko.state === "ready" ? "Connected" : cabinet.itaiko.state}
+          {device?.state === "ready" ? "Connected" : (device?.state ?? "disconnected")}
         </Badge>
-        {#if cabinet.itaiko.edition}<Badge variant="outline">{cabinet.itaiko.edition} {cabinet.itaiko.version}</Badge>{/if}
+        {#if device?.edition}<Badge variant="outline">{device.edition} {device.version}</Badge>{/if}
       </div>
+      {#if devices.length > 1}
+        <div class="mt-2 flex gap-1">
+          {#each devices as entry (entry.index)}
+            <Button
+              variant={entry.index === device?.index ? "default" : "outline"}
+              size="sm"
+              onclick={() => (selected = entry.index)}
+            >
+              {sideLabel(entry)}
+            </Button>
+          {/each}
+        </div>
+      {/if}
       <p class="mt-1 text-xs text-muted-foreground">
         Changes are applied immediately and saved in the controller. Only sensitivities and timings are exposed here.
       </p>
@@ -112,15 +169,19 @@
     </div>
   </div>
 
-  {#if error || cabinet.itaiko.error}
+  {#if error || device?.error}
     <p class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-      {error || cabinet.itaiko.error}
+      {error || device?.error}
     </p>
   {/if}
 
   {#if !Object.keys(draft).length}
     <div class="rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground">
-      {cabinet.control_online ? "Waiting for ITAIKO settings…" : "The cabinet is offline."}
+      {!cabinet.control_online
+        ? "The cabinet is offline."
+        : devices.length
+          ? "Waiting for ITAIKO settings…"
+          : "No ITAIKO drum is connected."}
     </div>
   {:else}
     <section class="grid gap-3">
