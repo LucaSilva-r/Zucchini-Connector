@@ -128,7 +128,16 @@ export const deleteCabinet = (token: string, cabinetId: string) =>
 export const exitCabinetGame = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/exit`, { method: "POST" });
 
-export type WebmanAction = "restart_game" | "exit_game" | "reboot";
+/** The three that end a play in progress; each one is confirmed in the UI. */
+export type DangerAction = "restart_game" | "exit_game" | "reboot";
+/** Virtual-pad buttons. Must match PAD_BUTTONS in app/main.py, lowercased. */
+export type PadButton =
+  | "up" | "down" | "left" | "right"
+  | "cross" | "circle" | "square" | "triangle"
+  | "l1" | "l2" | "r1" | "r2" | "l3" | "r3"
+  | "select" | "start" | "psbtn"
+  | "off";
+export type WebmanAction = DangerAction | `pad_${PadButton}`;
 
 export const runWebmanAction = (token: string, cabinetId: string, action: WebmanAction) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/webman`, {
@@ -137,8 +146,31 @@ export const runWebmanAction = (token: string, cabinetId: string, action: Webman
     body: JSON.stringify({ action }),
   });
 
+export const pressPadButton = (token: string, cabinetId: string, button: PadButton) =>
+  runWebmanAction(token, cabinetId, `pad_${button}`);
+
 export const requestScreenshot = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/screenshot`, { method: "POST" });
+
+export const screenshotUrl = (cabinetId: string, stamp: number) =>
+  `${API}/cabinets/${encodeURIComponent(cabinetId)}/screenshot?t=${stamp}`;
+
+/** Ask for a capture and wait for the image to land, returning a cache-busting
+ *  stamp for `screenshotUrl`. The console captures and uploads *after* it
+ *  answers, so the file is polled rather than waited on for a guessed delay,
+ *  and `X-Captured-At` is what tells a fresh capture from the last one. */
+export async function captureScreenshot(token: string, cabinetId: string): Promise<number> {
+  await requestScreenshot(token, cabinetId);
+  for (let attempt = 0; attempt < 15; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const stamp = Date.now();
+    const probe = await fetch(screenshotUrl(cabinetId, stamp), { credentials: "include" });
+    if (probe.ok && Number(probe.headers.get("X-Captured-At") ?? 0) * 1000 > stamp - 60000) return stamp;
+  }
+  throw new Error(
+    "No screenshot arrived. In-game capture needs the cabinet's control socket; on XMB it needs the webMAN agent.",
+  );
+}
 
 export const refreshInstalledGames = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/games/refresh`, {

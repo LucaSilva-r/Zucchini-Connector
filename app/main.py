@@ -725,6 +725,27 @@ WEBMAN_ACTIONS = {
     "reboot": "/reboot.ps3?soft",
 }
 
+# Virtual pad. webMAN registers a debug (LDD) controller and inserts one 70 ms
+# press per request, with the insert-into-game filter on, so these steer the
+# XMB and a running title alike. Every edition but `lite` builds it.
+#
+# webMAN matches button names by substring (`strcasestr` in vpad.h), so each of
+# these must name exactly one button and nothing else; the names below are the
+# ones it looks for, spelled its way. `off` unregisters the virtual controller,
+# which is the escape hatch if it ever bothers the real drum.
+#
+# These go through the same fixed map as the three above even though a button
+# press is harmless, because the point of the map is that the browser never
+# hands the CFW a path of its own making.
+PAD_BUTTONS = (
+    "up", "down", "left", "right",
+    "cross", "circle", "square", "triangle",
+    "L1", "L2", "R1", "R2", "L3", "R3",
+    "select", "start", "psbtn",
+    "off",
+)
+WEBMAN_ACTIONS |= {f"pad_{b.lower()}": f"/pad.ps3?{b}" for b in PAD_BUTTONS}
+
 
 @ui_api.post("/cabinets/{cabinet_id}/webman", dependencies=[Depends(auth.require_management)])
 async def cabinet_webman(cabinet_id: str, action: str = Body(embed=True)) -> dict[str, str]:

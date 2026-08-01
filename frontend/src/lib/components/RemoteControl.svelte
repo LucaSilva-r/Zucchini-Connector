@@ -7,7 +7,7 @@
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
-  import { exitCabinetGame, requestScreenshot } from "$lib/api.js";
+  import { captureScreenshot, exitCabinetGame, screenshotUrl } from "$lib/api.js";
   import type { Cabinet } from "$lib/types.js";
 
   let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
@@ -170,33 +170,13 @@
   // Cache-busting stamp: the screenshot URL is fixed per cabinet, so the
   // browser would otherwise show the previous capture forever.
   let shotStamp = $state(0);
-  const shotUrl = $derived(
-    shotStamp ? `/api/ui/cabinets/${encodeURIComponent(cabinet.cabinet_id)}/screenshot?t=${shotStamp}` : "",
-  );
+  const shotUrl = $derived(shotStamp ? screenshotUrl(cabinet.cabinet_id, shotStamp) : "");
 
   async function takeScreenshot() {
     shotBusy = true;
     shotError = "";
     try {
-      await requestScreenshot(token, cabinet.cabinet_id);
-      // The console captures and uploads after answering, so poll the image
-      // rather than guessing a delay.
-      for (let attempt = 0; attempt < 15; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        const stamp = Date.now();
-        const probe = await fetch(
-          `/api/ui/cabinets/${encodeURIComponent(cabinet.cabinet_id)}/screenshot?t=${stamp}`,
-          { credentials: "include" },
-        );
-        if (probe.ok) {
-          const captured = Number(probe.headers.get("X-Captured-At") ?? 0);
-          if (captured * 1000 > stamp - 60000) {
-            shotStamp = stamp;
-            return;
-          }
-        }
-      }
-      shotError = "No screenshot arrived. In-game capture needs the cabinet's control socket; on XMB it needs the webMAN agent.";
+      shotStamp = await captureScreenshot(token, cabinet.cabinet_id);
     } catch (err) {
       shotError = err instanceof Error ? err.message : String(err);
     } finally {

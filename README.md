@@ -142,10 +142,24 @@ has no route to its own console.
 The agent long-polls `/api/agent/poll` and runs each returned path through
 webMAN's own HTTP server on the console's loopback. The browser only picks an
 action name; paths are a fixed table in `app/main.py` (`restart_game`,
-`exit_game`, `reboot`). There is no shutdown action on purpose: nothing here
-can power a console back on.
+`exit_game`, `reboot`, plus one `pad_*` per controller button). There is no
+shutdown action on purpose: nothing here can power a console back on.
 `restart_game` is the unattended plugin-update round trip:
 `/xmb.ps3$exit;/wait.ps3?xmb;/wait.ps3?5;/pad.ps3?cross`.
+
+The **Console** tab also carries a virtual controller — d-pad, face buttons,
+shoulders, sticks-as-buttons, Select/Start/PS — and a screenshot button beside
+it, so an operator can see what is on screen while navigating. Each press is
+one `/pad.ps3?<button>` request: webMAN registers a debug (LDD) controller and
+inserts a single 70 ms press, with the insert-into-game filter on, so it steers
+the XMB and a running title alike. This is what drives a console whose drum is
+attached to a game that is not running. **Disconnect pad** unregisters the fake
+controller if the extra port ever bothers the real drum.
+
+Every webMAN edition but `[lite]` builds `VIRTUAL_PAD`. webMAN matches button
+names out of the query by substring, so the names in `PAD_BUTTONS` must never
+contain one another — a test enforces that, because a collision would silently
+press two buttons.
 
 The dashboard's **Games** tab is populated by the same VSH agent. It reports
 only direct installed applications below `/dev_hdd0/game`, using each

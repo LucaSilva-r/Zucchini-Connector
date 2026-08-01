@@ -12,7 +12,7 @@ import unittest
 from app import cabinets
 from app.config import settings
 from app.control import ControlHub
-from app.main import WEBMAN_ACTIONS
+from app.main import PAD_BUTTONS, WEBMAN_ACTIONS
 
 from tests.test_control_heartbeat import CABINET_ID, StubSocket
 
@@ -75,6 +75,22 @@ class WebmanActionTests(unittest.TestCase):
         for path in WEBMAN_ACTIONS.values():
             self.assertTrue(path.startswith("/"))
             self.assertTrue(all(0x20 < ord(c) < 0x7F for c in path), path)
+
+
+class VirtualPadTests(unittest.TestCase):
+    def test_no_button_name_contains_another(self) -> None:
+        # webMAN picks buttons out of the query with strcasestr, so a name that
+        # contains another one presses both. Nothing warns about it: the press
+        # just does more than the button says.
+        names = [button.lower() for button in PAD_BUTTONS]
+        for name in names:
+            for other in names:
+                if name != other:
+                    self.assertNotIn(other, name, f"pad_{name} would also press {other}")
+
+    def test_every_button_is_reachable_as_an_action(self) -> None:
+        for button in PAD_BUTTONS:
+            self.assertEqual(WEBMAN_ACTIONS[f"pad_{button.lower()}"], f"/pad.ps3?{button}")
 
 
 if __name__ == "__main__":
