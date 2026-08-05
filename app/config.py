@@ -67,14 +67,19 @@ class Settings:
         self.management_session_seconds = max(
             300, int(env("MANAGEMENT_SESSION_SECONDS", str(8 * 60 * 60)))
         )
-        # Plain-HTTP listener for webMAN agents. webMAN has no TLS stack, so
-        # this cannot be the HTTPS port; it serves only authenticated agent
-        # poll, inventory and upload routes and is meant for the arcade LAN.
-        # 0 disables it.
+        # Legacy plain-HTTP listener for pre-TLS agent configurations. Current
+        # agents use the main HTTPS/WSS listener; this remains during staged
+        # cabinet upgrades and must stay on the private arcade LAN. 0 disables.
         self.agent_port = int(env("AGENT_PORT", "8080"))
+        # ProDG connects here after an operator enables the debug bridge for
+        # one WSS cabinet. Native runs stay loopback-only; Docker overrides the
+        # internal bind and publishes the container port on host 127.0.0.1.
+        self.debug_host = env("DEBUG_HOST", "127.0.0.1")
+        self.debug_port = int(env("DEBUG_PORT", "1000"))
         # Deliberately NOT api_token: that one is the TaikOnline card-issuer
-        # credential, and the agent channel is cleartext and its token ends up
-        # in a file on the cabinet's disk. A compromised agent token can
+        # credential. Legacy agent traffic can still be cleartext during the
+        # migration, and this token ends up in a file on each cabinet's disk.
+        # A compromised agent token can
         # reboot consoles; it must not also mint cards. Generated once and
         # kept in storage so a fresh install needs no configuration.
         self.agent_token = env("AGENT_TOKEN", "") or self._persistent_agent_token()

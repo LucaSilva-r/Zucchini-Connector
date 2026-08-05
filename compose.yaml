@@ -9,6 +9,9 @@ services:
       # UI: it serves only authenticated /api/agent/* routes. Keep it on the
       # arcade LAN.
       - "${CONNECTOR_AGENT_PORT:-8080}:8080"
+      # ProDG tunnel. Never publish this on 0.0.0.0: remote use goes through
+      # an SSH local-forward to the Connector host's loopback address.
+      - "127.0.0.1:${CONNECTOR_DEBUG_PORT:-1000}:1000"
     # Run as the host user so files written into ./storage stay editable
     # outside the container. Export UID/GID (id -u / id -g) to override.
     user: "${UID:-1000}:${GID:-1000}"
@@ -19,8 +22,14 @@ services:
       CONNECTOR_API_TOKEN: "${CONNECTOR_API_TOKEN:-}"
       # Credential for the webMAN agent channel. Left blank, the connector
       # generates one into storage/agent_token. Never reuse the API token:
-      # this one crosses the LAN in clear and lands on every cabinet's disk.
+      # legacy 8080 traffic may cross the LAN in clear, and this credential is
+      # stored on every cabinet's disk.
       CONNECTOR_AGENT_TOKEN: "${CONNECTOR_AGENT_TOKEN:-}"
+      # Keep 8080 during staged upgrades. Set this to 0 only after every
+      # cabinet has proven it can reconnect through the HTTPS agent route.
+      CONNECTOR_AGENT_PORT: "${CONNECTOR_AGENT_PORT:-8080}"
+      CONNECTOR_DEBUG_HOST: "0.0.0.0"
+      CONNECTOR_DEBUG_PORT: "1000"
       CONNECTOR_MANAGEMENT_PIN: "${CONNECTOR_MANAGEMENT_PIN:-2585}"
       CONNECTOR_AT3_BITRATE_KBPS: "${CONNECTOR_AT3_BITRATE_KBPS:-256}"
       CONNECTOR_CONVERSION_WORKERS: "${CONNECTOR_CONVERSION_WORKERS:-4}"

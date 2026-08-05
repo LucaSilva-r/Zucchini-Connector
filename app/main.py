@@ -6,11 +6,11 @@ import os
 from pathlib import Path
 from threading import Thread
 
-from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, WebSocket, status
+from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agents, auth, cabinets, catalog, control, converter, database, library_admin, updates
+from . import agents, auth, cabinets, catalog, control, converter, database, debug_tunnel, library_admin, updates
 from .config import settings
 
 app = FastAPI(title="zucchini-connector")
@@ -81,9 +81,70 @@ def require_agent_token(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 
+def _agent_websocket_authorized(websocket: WebSocket) -> bool:
+    return not settings.agent_token or websocket.headers.get(
+        "authorization", ""
+    ) == f"Bearer {settings.agent_token}"
+
+
+def _agent_stream_status(cabinet_id: str, message: str) -> None:
+    """Parse the tiny tab-separated heartbeat emitted by the VSH agent."""
+    fields = message.rstrip("\n").split("\t")
+    if len(fields) not in (5, 6) or fields[0] != "status":
+        return
+    agents.hub.note_seen(cabinet_id, fields[1])
+    agents.hub.note_sensors(cabinet_id, fields[2], fields[3], fields[4])
+    agents.hub.note_capabilities(cabinet_id, fields[5] if len(fields) == 6 else "")
+
+
+@agent_api.websocket("/ws")
+async def agent_websocket(websocket: WebSocket, id: str = "") -> None:
+    """Persistent WSS command channel; binary frames are reserved for DECI3."""
+    if not id or not _agent_websocket_authorized(websocket):
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+    await websocket.accept()
+    queue, token = agents.hub.attach_stream(id)
+    agents.hub.note_seen(id, "")
+    await asyncio.to_thread(cabinets.mark_agent_seen, id)
+    receive = asyncio.create_task(websocket.receive())
+    outgoing = asyncio.create_task(queue.get())
+    try:
+        await websocket.send_text("ready\n")
+        while True:
+            done, _ = await asyncio.wait(
+                (receive, outgoing), return_when=asyncio.FIRST_COMPLETED
+            )
+            if outgoing in done:
+                frame = outgoing.result()
+                if frame.kind == "bytes":
+                    await websocket.send_bytes(frame.payload)  # type: ignore[arg-type]
+                else:
+                    await websocket.send_text(frame.payload)  # type: ignore[arg-type]
+                outgoing = asyncio.create_task(queue.get())
+            if receive in done:
+                message = receive.result()
+                if message["type"] == "websocket.disconnect":
+                    break
+                if message.get("text") is not None:
+                    _agent_stream_status(id, message["text"])
+                    await debug_tunnel.tunnel.agent_message(id, message["text"])
+                elif message.get("bytes") is not None:
+                    await debug_tunnel.tunnel.from_agent(id, message["bytes"])
+                receive = asyncio.create_task(websocket.receive())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        receive.cancel()
+        outgoing.cancel()
+        agents.hub.detach_stream(id, token)
+        await debug_tunnel.tunnel.agent_disconnected(id)
+
+
 @agent_api.get("/poll", dependencies=[Depends(require_agent_token)])
 async def agent_poll(
-    id: str = "", state: str = "", cpu_temp: str = "", rsx_temp: str = "", fan: str = ""
+    id: str = "", state: str = "", cpu_temp: str = "", rsx_temp: str = "",
+    fan: str = "", cap: str = ""
 ) -> Response:
     """Long-poll for webMAN commands. Body is one command path per line.
 
@@ -95,6 +156,7 @@ async def agent_poll(
         raise HTTPException(status_code=400, detail="Cabinet id required")
     agents.hub.note_seen(id, state)
     agents.hub.note_sensors(id, cpu_temp, rsx_temp, fan)
+    agents.hub.note_capabilities(id, cap)
     await asyncio.to_thread(cabinets.mark_agent_seen, id)
     commands = await agents.hub.wait(id)
     return Response(
@@ -213,10 +275,9 @@ async def agent_upload(request: Request, id: str = "", kind: str = "") -> dict[s
 # ----------------------------------------------------------------------
 # File manager
 #
-# The console answers over the same held poll as every other agent verb, so
-# these UI routes are synchronous from the operator's side and hold their
-# request until the cabinet replies. The agent executes one command at a
-# time, so a large pull blocks the next one until it finishes.
+# The console answers asynchronously over WSS or the legacy held poll, so these
+# UI routes hold their request until the cabinet replies. The agent executes
+# one command at a time, so a large pull blocks the next one until it finishes.
 # ----------------------------------------------------------------------
 
 FS_LIST_TIMEOUT = 45
@@ -362,7 +423,9 @@ async def cabinet_fs_fetch(cabinet_id: str, path: str = Body(embed=True)) -> Res
     )
 
 
-async def _stage_push(upload: UploadFile, path: Path, require_self: bool) -> int:
+async def _stage_push(
+    upload: UploadFile, path: Path, target: agents.PushTarget
+) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".part")
     total = 0
@@ -371,17 +434,19 @@ async def _stage_push(upload: UploadFile, path: Path, require_self: bool) -> int
         with tmp.open("wb") as fh:
             while chunk := await upload.read(256 * 1024):
                 total += len(chunk)
-                if total > agents.MAX_PUSH_BYTES:
-                    raise ValueError("File exceeds the 32 MiB push limit")
-                if len(first) < 4:
-                    first = (first + chunk)[:4]
+                if total > target.max_bytes:
+                    limit = target.max_bytes // (1024 * 1024)
+                    raise ValueError(f"File exceeds the {limit} MiB push limit")
+                if len(first) < 8:
+                    first = (first + chunk)[:8]
                 fh.write(chunk)
-        if not total:
+        if total < target.min_bytes:
+            minimum = target.min_bytes // (1024 * 1024)
+            if minimum:
+                raise ValueError(f"File is smaller than the {minimum} MiB minimum")
             raise ValueError("File is empty")
-        # The agent checks this too, on the side that would have to be
-        # recovered by hand — an unsigned "SPRX" pushed over the agent itself
-        # is the one failure with no way back in.
-        if require_self and first != b"SCE\0":
+        # The agent repeats this check after downloading the staged file.
+        if target.magic is not None and not first.startswith(target.magic):
             raise ValueError("Not a signed PS3 SELF/SPRX (missing SCE header)")
         await asyncio.to_thread(os.replace, tmp, path)
     except BaseException:
@@ -394,7 +459,7 @@ async def _stage_push(upload: UploadFile, path: Path, require_self: bool) -> int
 async def cabinet_fs_push(
     cabinet_id: str, kind: str = Form(...), file: UploadFile = File(...)
 ) -> dict[str, object]:
-    """Replace one of the three files a cabinet will accept.
+    """Replace one of the fixed files a cabinet will accept.
 
     `kind` is never a path: agents.PUSH_KINDS and the agent's own table decide
     where each one lands, and the agent's config is in neither.
@@ -403,6 +468,11 @@ async def cabinet_fs_push(
         raise HTTPException(status_code=404, detail="Cabinet not found")
     if kind not in agents.PUSH_KINDS:
         raise HTTPException(status_code=400, detail="Unknown push target")
+    if kind == "firmware" and not agents.hub.supports(cabinet_id, "firmware01"):
+        raise HTTPException(
+            status_code=409,
+            detail="This cabinet needs the firmware-capable agent upgrade first",
+        )
     staged = _push_path(cabinet_id, kind)
     try:
         size = await _stage_push(file, staged, agents.PUSH_KINDS[kind])
@@ -412,7 +482,8 @@ async def cabinet_fs_push(
     agents.hub.arm(cabinet_id, "put")
     if not agents.hub.enqueue(cabinet_id, agents.push_command(kind)):
         raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
-    result = await agents.hub.collect(cabinet_id, "put", FS_TRANSFER_TIMEOUT)
+    transfer_timeout = 30 * 60 if kind == "firmware" else FS_TRANSFER_TIMEOUT
+    result = await agents.hub.collect(cabinet_id, "put", transfer_timeout)
     if result is None:
         raise HTTPException(status_code=504, detail="The cabinet did not answer")
     if not result.get("ok"):
@@ -461,8 +532,8 @@ def start_agent_listener() -> None:
     """Serve the agent route over plain HTTP on its own port.
 
     A separate app, not the main one: everything else here — the management UI,
-    its cookies, the catalog — must not become reachable without TLS just
-    because the agents cannot speak it.
+    its cookies, the catalog — must not become reachable without TLS while old
+    cabinet configurations still need the migration listener.
     """
     if not settings.agent_port:
         return
@@ -759,6 +830,34 @@ def cabinet_show(cabinet_id: str) -> dict[str, object]:
     if cab is None:
         raise HTTPException(status_code=404, detail="Cabinet not found")
     return control.hub.decorate(cab)
+
+
+@ui_api.get(
+    "/cabinets/{cabinet_id}/debug",
+    dependencies=[Depends(auth.require_management)],
+)
+def cabinet_debug_status(cabinet_id: str) -> dict[str, object]:
+    current = debug_tunnel.tunnel.status()
+    return {
+        **current,
+        "enabled": current["enabled"] and current["cabinet_id"] == cabinet_id,
+        "available": agents.hub.stream_online(cabinet_id),
+    }
+
+
+@ui_api.put(
+    "/cabinets/{cabinet_id}/debug",
+    dependencies=[Depends(auth.require_management)],
+)
+async def cabinet_debug_configure(
+    cabinet_id: str, enabled: bool = Body(embed=True)
+) -> dict[str, object]:
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    try:
+        return await debug_tunnel.tunnel.configure(cabinet_id, enabled)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _installed_game(cab: dict, directory: str) -> dict[str, object] | None:

@@ -149,6 +149,25 @@ export const runWebmanAction = (token: string, cabinetId: string, action: Webman
 export const pressPadButton = (token: string, cabinetId: string, button: PadButton) =>
   runWebmanAction(token, cabinetId, `pad_${button}`);
 
+export type DebugTunnelStatus = {
+  enabled: boolean;
+  available?: boolean;
+  cabinet_id: string;
+  client_connected: boolean;
+  host: string;
+  port: number;
+};
+
+export const getDebugTunnel = (token: string, cabinetId: string) =>
+  apiRequest<DebugTunnelStatus>(token, `/cabinets/${cabinetId}/debug`);
+
+export const setDebugTunnel = (token: string, cabinetId: string, enabled: boolean) =>
+  apiRequest<DebugTunnelStatus>(token, `/cabinets/${cabinetId}/debug`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+
 export const requestScreenshot = (token: string, cabinetId: string) =>
   apiRequest<{ status: string }>(token, `/cabinets/${cabinetId}/screenshot`, { method: "POST" });
 
@@ -242,9 +261,9 @@ export async function downloadConsoleFile(token: string, cabinetId: string, path
   URL.revokeObjectURL(url);
 }
 
-/** The three files a cabinet will accept. Not a path: the destination lives
+/** The fixed files a cabinet will accept. Not a path: the destination lives
  *  in the agent's own table, and the agent's config is not in it. */
-export type PushKind = "agent" | "mod" | "config";
+export type PushKind = "agent" | "mod" | "config" | "firmware";
 
 export const pushConsoleFile = (token: string, cabinetId: string, kind: PushKind, file: File) => {
   const body = new FormData();

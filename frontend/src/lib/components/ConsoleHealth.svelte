@@ -2,16 +2,21 @@
   import ThermometerIcon from "@lucide/svelte/icons/thermometer";
   import Gamepad2Icon from "@lucide/svelte/icons/gamepad-2";
   import CameraIcon from "@lucide/svelte/icons/camera";
+  import CableIcon from "@lucide/svelte/icons/cable";
+  import { onMount } from "svelte";
   import {
     captureScreenshot,
+    getDebugTunnel,
     pressPadButton,
     runWebmanAction,
     screenshotUrl,
+    setDebugTunnel,
     type DangerAction,
     type PadButton,
   } from "$lib/api.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import { Switch } from "$lib/components/ui/switch/index.js";
   import type { Cabinet } from "$lib/types.js";
 
   let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
@@ -113,6 +118,37 @@
       shotBusy = false;
     }
   }
+
+  let debugEnabled = $state(false);
+  let debugClient = $state(false);
+  let debugBusy = $state(false);
+  let debugError = $state("");
+
+  async function refreshDebug() {
+    try {
+      const result = await getDebugTunnel(token, cabinet.cabinet_id);
+      debugEnabled = result.enabled;
+      debugClient = result.client_connected;
+    } catch (err) {
+      debugError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function toggleDebug(enabled: boolean) {
+    debugBusy = true;
+    debugError = "";
+    try {
+      const result = await setDebugTunnel(token, cabinet.cabinet_id, enabled);
+      debugEnabled = result.enabled;
+      debugClient = result.client_connected;
+    } catch (err) {
+      debugError = err instanceof Error ? err.message : String(err);
+    } finally {
+      debugBusy = false;
+    }
+  }
+
+  onMount(refreshDebug);
 </script>
 
 <div class="grid gap-4">
@@ -141,7 +177,7 @@
       </dl>
     {:else}
       <p class="mt-3 text-sm text-muted-foreground">
-        Nothing reported yet. The agent relays webMAN's console page every fourth poll, so this fills in within a couple of minutes of the
+        Nothing reported yet. The agent relays webMAN's console page roughly every two minutes, so this fills in shortly after the
         cabinet coming online.
       </p>
     {/if}
@@ -154,6 +190,32 @@
         <pre class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap rounded bg-muted/50 p-2 text-[11px]">{health.text}</pre>
       </details>
     {/if}
+  </div>
+
+  <div class="rounded-lg border p-3">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-2 text-sm font-semibold">
+        <CableIcon class="size-4" /> ProDG debug tunnel
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-muted-foreground">
+          {debugClient ? "ProDG connected" : debugEnabled ? "Listening on 127.0.0.1:1000" : "Closed"}
+        </span>
+        <Switch
+          checked={debugEnabled}
+          disabled={cabinet.agent_transport !== "wss" || debugBusy}
+          onCheckedChange={toggleDebug}
+        />
+      </div>
+    </div>
+    <p class="mt-2 text-xs text-muted-foreground">
+      Opens Connector port 1000 on loopback only and carries the DEX DECI3 stream through the cabinet's authenticated WSS connection.
+      For a remote Connector, forward it locally with SSH before starting ProDG.
+      {#if cabinet.agent_transport !== "wss"}
+        <span class="text-destructive"> This requires the TLS WebSocket agent.</span>
+      {/if}
+    </p>
+    {#if debugError}<p class="mt-2 text-sm text-destructive">{debugError}</p>{/if}
   </div>
 
 {#snippet pad(button: PadButton, label: string, extra = "")}

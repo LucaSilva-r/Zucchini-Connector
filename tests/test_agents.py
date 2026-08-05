@@ -36,11 +36,40 @@ class AgentHubTests(unittest.IsolatedAsyncioTestCase):
             ["/a.ps3", "/b.ps3"],
         )
 
+    async def test_websocket_stream_is_preferred_over_poll(self) -> None:
+        agents.hub.note_seen(CABINET_ID, "xmb")
+        queue, token = agents.hub.attach_stream(CABINET_ID)
+        try:
+            self.assertTrue(agents.hub.enqueue(CABINET_ID, "/reboot.ps3?soft"))
+            frame = await asyncio.wait_for(queue.get(), timeout=1)
+            self.assertEqual(frame.kind, "text")
+            self.assertEqual(frame.payload, "/reboot.ps3?soft\n")
+            self.assertEqual(agents.hub.status(CABINET_ID)["agent_transport"], "wss")
+        finally:
+            agents.hub.detach_stream(CABINET_ID, token)
+
+    async def test_websocket_detach_restores_poll_queue(self) -> None:
+        agents.hub.note_seen(CABINET_ID, "xmb")
+        _queue, token = agents.hub.attach_stream(CABINET_ID)
+        agents.hub.detach_stream(CABINET_ID, token)
+        self.assertTrue(agents.hub.enqueue(CABINET_ID, "/a.ps3"))
+        self.assertEqual(await agents.hub.wait(CABINET_ID), ["/a.ps3"])
+
     async def test_presence_expires(self) -> None:
         agents.hub.note_seen(CABINET_ID, "xmb")
         self.assertTrue(agents.hub.online(CABINET_ID))
         agents.hub._seen[CABINET_ID] = (0.0, "xmb")
         self.assertFalse(agents.hub.online(CABINET_ID))
+
+    async def test_agent_capabilities_are_explicit_and_replace_old_values(self) -> None:
+        self.assertFalse(agents.hub.supports(CABINET_ID, "firmware01"))
+        agents.hub.note_capabilities(CABINET_ID, "firmware01,debug!bad")
+        self.assertTrue(agents.hub.supports(CABINET_ID, "firmware01"))
+        self.assertEqual(
+            agents.hub.status(CABINET_ID)["agent_capabilities"], ["firmware01"]
+        )
+        agents.hub.note_capabilities(CABINET_ID, "")
+        self.assertFalse(agents.hub.supports(CABINET_ID, "firmware01"))
 
     async def test_agent_is_preferred_over_the_other_routes(self) -> None:
         """The agent is the only route that works with no game running."""

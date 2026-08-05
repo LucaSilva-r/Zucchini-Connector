@@ -43,8 +43,10 @@ class ConsolePathTests(unittest.TestCase):
 
 
 class PushTargetTests(unittest.TestCase):
-    def test_only_three_kinds_exist(self) -> None:
-        self.assertEqual(set(agents.PUSH_KINDS), {"agent", "mod", "config"})
+    def test_only_fixed_kinds_exist(self) -> None:
+        self.assertEqual(
+            set(agents.PUSH_KINDS), {"agent", "mod", "config", "firmware"}
+        )
 
     def test_the_agent_config_is_not_a_push_target(self) -> None:
         """The one file that could sever the link back to the cabinet."""
@@ -147,6 +149,8 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
                 return chunk
 
         agents.hub.note_seen("files02", "xmb")
+        if kind == "firmware":
+            agents.hub.note_capabilities("files02", "firmware01")
         task = asyncio.create_task(main.cabinet_fs_push("files02", kind, _Upload()))
         await asyncio.sleep(0.05)
         return task
@@ -157,6 +161,28 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(raised.exception.status_code, 400)
         self.assertFalse(agents.hub.online("files02") and agents.hub._pending.get("files02"))
+
+    async def test_firmware_validation_is_left_to_the_console(self) -> None:
+        task = await self._push("firmware", b"the updater decides")
+        self.assertEqual(
+            await asyncio.wait_for(agents.hub.wait("files02"), timeout=1),
+            ["put\tfirmware"],
+        )
+        agents.hub.note_result(
+            "files02", "put", {"kind": "firmware", "ok": True, "size": 19}
+        )
+        self.assertEqual((await task)["status"], "installed")
+
+    async def test_old_agent_cannot_receive_the_firmware_command(self) -> None:
+        agents.hub.note_seen("files02", "xmb")
+
+        class _Upload:
+            async def read(self, _size: int) -> bytes:
+                return b""
+
+        with self.assertRaises(HTTPException) as raised:
+            await main.cabinet_fs_push("files02", "firmware", _Upload())
+        self.assertEqual(raised.exception.status_code, 409)
 
     async def test_a_signed_sprx_is_staged_and_the_console_told_to_take_it(self) -> None:
         task = await self._push("mod", b"SCE\0" + b"\x00" * 64)

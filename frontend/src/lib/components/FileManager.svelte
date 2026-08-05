@@ -20,9 +20,9 @@
   let { token, cabinet }: { token: string; cabinet: Cabinet } = $props();
 
   // Where an operator actually needs to look. / lists the mount points.
-  const SHORTCUTS = ["/dev_hdd0/plugins/taiko", "/dev_hdd0/plugins", "/dev_hdd0/game", "/dev_hdd0/tmp", "/"];
+  const SHORTCUTS = ["/dev_hdd0/plugins/taiko", "/dev_hdd0/plugins", "/dev_hdd0/game", "/dev_hdd0/updater/01", "/dev_hdd0/tmp", "/"];
 
-  const TARGETS: { kind: PushKind; label: string; path: string; accept: string; note: string }[] = [
+  const TARGETS: { kind: PushKind; label: string; path: string; accept: string; note: string; capability?: string }[] = [
     {
       kind: "mod",
       label: "Zucchini plugin",
@@ -43,6 +43,14 @@
       path: "/dev_hdd0/plugins/zucchini_agent.sprx",
       accept: ".sprx",
       note: "The plugin doing this transfer. Takes effect on the next reboot.",
+    },
+    {
+      kind: "firmware",
+      label: "PS3 firmware",
+      path: "/dev_hdd0/updater/01/PS3UPDAT.PUP",
+      accept: ".PUP,.pup",
+      note: "The PS3 updater performs firmware validation. Use the Connector origin through an SSH tunnel if Cloudflare rejects the 200+ MiB upload.",
+      capability: "firmware01",
     },
   ];
 
@@ -121,7 +129,7 @@
         <HardDriveIcon class="size-4" /> Console files
       </div>
       <p class="mt-1 max-w-3xl text-xs text-muted-foreground">
-        Served by the VSH agent over the cabinet's own poll, so it works behind NAT and while no game
+        Served by the VSH agent over its WSS or fallback poll, so it works behind NAT and while no game
         is running. Listing and downloading hold the request open until the console answers.
       </p>
     </div>
@@ -212,7 +220,7 @@
     <div>
       <h3 class="text-sm font-semibold">Replace a file</h3>
       <p class="mt-0.5 text-xs text-muted-foreground">
-        These three destinations are fixed in the agent — the connector sends the file, never the path.
+        These destinations are fixed in the agent — the connector sends the file, never the path.
         The agent's own config is deliberately not replaceable: it holds the address and token this
         link runs on, so a bad push there could not be undone remotely.
       </p>
@@ -230,12 +238,12 @@
               class="hidden"
               type="file"
               accept={target.accept}
-              disabled={!cabinet.agent_online || busy !== ""}
+              disabled={!cabinet.agent_online || busy !== "" || !!target.capability && !cabinet.agent_capabilities.includes(target.capability)}
               onchange={(event) => push(target.kind, event.currentTarget)}
             />
             <span
               class="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium hover:bg-muted aria-disabled:pointer-events-none aria-disabled:opacity-50"
-              aria-disabled={!cabinet.agent_online || busy !== ""}
+              aria-disabled={!cabinet.agent_online || busy !== "" || !!target.capability && !cabinet.agent_capabilities.includes(target.capability)}
             >
               <UploadIcon class="size-4" /> {busy === target.kind ? "Sending…" : "Upload"}
             </span>

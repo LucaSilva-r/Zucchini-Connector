@@ -12,6 +12,8 @@ export type Cabinet = {
   agent_online: boolean;
   agent_state: string;
   agent_seen: number;
+  agent_transport: "poll" | "wss";
+  agent_capabilities: string[];
   agent_health: AgentHealth;
   installed_games: InstalledGame[];
   games_updated_at: number;

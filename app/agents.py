@@ -4,11 +4,13 @@ The Zucchini plugin dies with the game, so it cannot act during the gap that
 matters most — after a title exits and before the next one starts. The agent is
 a separate VSH plugin, which is therefore up whenever the console is.
 
-It long-polls this module over plain HTTP: webMAN has no TLS, and a PS3 game
-process has no route to its own console, so neither WSS nor a loopback relay
-was available. Commands are webMAN web-command paths, executed on the console
-by webMAN's own handler. Agent-native verbs also report installed HDD games,
-configure autoboot, and launch a selected directory through game_ext_plugin.
+Current agents keep an authenticated WSS connection to this module. During a
+safe staged rollout, old configurations continue to long-poll the dedicated
+HTTP listener and TLS-enabled agents fall back to verified HTTPS polling if a
+WebSocket upgrade is unavailable. Commands are webMAN web-command paths,
+executed on-console by webMAN's own handler. Agent-native verbs also report
+installed HDD games, configure autoboot, launch a selected directory through
+game_ext_plugin, and carry an explicitly enabled DEX debug stream.
 """
 
 from __future__ import annotations
@@ -17,30 +19,44 @@ import asyncio
 import html
 import re
 import time
+from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import quote, unquote
 
 # How long a poll is held open before answering with an empty body. Long
 # enough that an idle cabinet is nearly silent, short enough that the agent's
 # own receive timeout never fires first.
 POLL_HOLD_SECONDS = 25
-# An agent that has not polled within this window is treated as gone. Two
-# missed polls, so one lost round trip does not flap the UI.
+# An agent that has not sent a WSS status frame or polled within this window is
+# treated as gone. This tolerates two missed legacy polls or three WSS frames.
 PRESENCE_SECONDS = POLL_HOLD_SECONDS * 2 + 10
 MAX_INSTALLED_GAMES = 256
 MAX_DIR_ENTRIES = 4096
-# One pulled file. Matches ZU_FS_GET_MAX / ZU_FS_PUT_MAX in the agent.
+# One pulled file. Matches ZU_FS_GET_MAX in the agent.
 MAX_PULL_BYTES = 64 * 1024 * 1024
-MAX_PUSH_BYTES = 32 * 1024 * 1024
 
-# The only three files the connector may replace on a cabinet, and whether
-# each one has to be a signed SELF. This mirrors g_push_targets in the agent,
+@dataclass(frozen=True)
+class PushTarget:
+    magic: bytes | None
+    min_bytes: int
+    max_bytes: int
+
+
+# The only files the connector may replace on a cabinet. This mirrors
+# g_push_targets in the agent,
 # which is where the destination paths actually live — the connector never
 # sends a path, only one of these names.
 #
 # The agent's own config is deliberately not here and not there: it holds the
 # connector address and the token used to reach it, so a bad push to it is the
 # one mistake that could not then be undone remotely.
-PUSH_KINDS: dict[str, bool] = {"agent": True, "mod": True, "config": False}
+PUSH_KINDS: dict[str, PushTarget] = {
+    "agent": PushTarget(b"SCE\0", 1, 32 * 1024 * 1024),
+    "mod": PushTarget(b"SCE\0", 1, 32 * 1024 * 1024),
+    "config": PushTarget(None, 1, 32 * 1024 * 1024),
+    # Firmware validity is authoritative only when the PS3 updater parses it.
+    "firmware": PushTarget(None, 1, 512 * 1024 * 1024),
+}
 DEFAULT_SENSORS = {"cpu_temp": 0, "rsx_temp": 0, "fan_percent": 0}
 MAX_HEALTH_BYTES = 64 * 1024
 # What the operator sees when the parser found nothing it recognised.
@@ -49,6 +65,19 @@ MAX_HEALTH_TEXT = 2000
 _BREAK = re.compile(r"(?i)<\s*(br|hr|/tr|/div|/h1|/h2|/p|/font|/table)[^>]*>")
 _TAG = re.compile(r"<[^>]*>")
 _BLANK = re.compile(r"\n{2,}")
+
+
+@dataclass(frozen=True)
+class StreamFrame:
+    kind: Literal["text", "bytes"]
+    payload: str | bytes
+
+
+@dataclass
+class AgentStream:
+    loop: asyncio.AbstractEventLoop
+    queue: asyncio.Queue[StreamFrame]
+    token: object
 
 
 def validate_game_directory(directory: str) -> str:
@@ -295,6 +324,7 @@ class AgentHub:
         self._pending: dict[str, list[str]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._seen: dict[str, tuple[float, str]] = {}
+        self._capabilities: dict[str, frozenset[str]] = {}
         self._sensors: dict[str, dict[str, int]] = {}
         self._health: dict[str, dict[str, object]] = {}
         # File-manager replies, keyed by (cabinet, verb). One slot per verb:
@@ -302,6 +332,11 @@ class AgentHub:
         # once would collide, which is a queue away if it ever matters.
         self._results: dict[tuple[str, str], object] = {}
         self._result_events: dict[tuple[str, str], asyncio.Event] = {}
+        # WSS is owned by the main HTTPS event loop. The legacy HTTP listener
+        # runs in a second Uvicorn thread during migration, while management
+        # routes may be sync endpoints running in FastAPI's thread pool; use
+        # call_soon_threadsafe for every cross-thread delivery.
+        self._streams: dict[str, AgentStream] = {}
 
     def _event(self, cabinet_id: str) -> asyncio.Event:
         event = self._wakeups.get(cabinet_id)
@@ -322,6 +357,8 @@ class AgentHub:
             # even while the cabinet's own control socket is down.
             "agent_state": seen[1] if seen else "",
             "agent_seen": int(seen[0]) if seen else 0,
+            "agent_transport": "wss" if cabinet_id in self._streams else "poll",
+            "agent_capabilities": sorted(self._capabilities.get(cabinet_id, ())),
             # Console health, 0 when the cabinet did not report it. Kept in
             # memory only: it is worth nothing once it is a minute old, so it
             # is not worth a write per poll per cabinet.
@@ -359,6 +396,14 @@ class AgentHub:
         if not self.online(cabinet_id):
             print(f"[connector] webMAN agent online: {cabinet_id} ({state})", flush=True)
         self._seen[cabinet_id] = (time.time(), state[:16])
+
+    def note_capabilities(self, cabinet_id: str, value: str) -> None:
+        self._capabilities[cabinet_id] = frozenset(
+            item for item in value.split(",") if re.fullmatch(r"[a-z0-9_-]{1,32}", item)
+        )
+
+    def supports(self, cabinet_id: str, capability: str) -> bool:
+        return capability in self._capabilities.get(cabinet_id, ())
 
     def arm(self, cabinet_id: str, verb: str) -> None:
         """Drop any stale reply and get ready for a new one.
@@ -401,9 +446,47 @@ class AgentHub:
         """Queue an ordered batch that one poll drains atomically."""
         if not self.online(cabinet_id) or not commands:
             return False
+        if self.send_text(cabinet_id, "\n".join(commands) + "\n"):
+            return True
         self._pending.setdefault(cabinet_id, []).extend(commands)
         self._event(cabinet_id).set()
         return True
+
+    def attach_stream(self, cabinet_id: str) -> tuple[asyncio.Queue[StreamFrame], object]:
+        """Register one authenticated WSS connection, replacing an older one."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[StreamFrame] = asyncio.Queue()
+        token = object()
+        self._streams[cabinet_id] = AgentStream(loop, queue, token)
+        queued = self._pending.pop(cabinet_id, [])
+        if queued:
+            queue.put_nowait(StreamFrame("text", "\n".join(queued) + "\n"))
+        return queue, token
+
+    def detach_stream(self, cabinet_id: str, token: object) -> None:
+        stream = self._streams.get(cabinet_id)
+        if stream is not None and stream.token is token:
+            self._streams.pop(cabinet_id, None)
+
+    def _send_stream(self, cabinet_id: str, frame: StreamFrame) -> bool:
+        stream = self._streams.get(cabinet_id)
+        if stream is None or stream.loop.is_closed():
+            return False
+        try:
+            stream.loop.call_soon_threadsafe(stream.queue.put_nowait, frame)
+        except RuntimeError:
+            return False
+        return True
+
+    def send_text(self, cabinet_id: str, text: str) -> bool:
+        return self._send_stream(cabinet_id, StreamFrame("text", text))
+
+    def send_bytes(self, cabinet_id: str, payload: bytes) -> bool:
+        return self._send_stream(cabinet_id, StreamFrame("bytes", payload))
+
+    def stream_online(self, cabinet_id: str) -> bool:
+        stream = self._streams.get(cabinet_id)
+        return stream is not None and not stream.loop.is_closed()
 
     async def wait(self, cabinet_id: str) -> list[str]:
         """Drain queued commands, holding the poll open while there are none."""

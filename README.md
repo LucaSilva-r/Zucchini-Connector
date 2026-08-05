@@ -133,17 +133,20 @@ saw). `M\n` carries:
 ### Console commands (webMAN agent)
 
 Commands that must outlive the game — reboot, exit to XMB, relaunch the title —
-are webMAN MOD web commands, delivered by a standalone ~9 KB VSH plugin
+are webMAN MOD web commands, delivered by a standalone ~127 KB VSH plugin
 ([zucchini-webman-agent]) — not a webMAN fork, so webMAN stays stock and
 updatable. It lives in VSH, so it is up whenever the console is; the Zucchini
 plugin cannot do this job, because it dies with the game and a PS3 game process
 has no route to its own console.
 
-The agent long-polls `/api/agent/poll` and runs each returned path through
-webMAN's own HTTP server on the console's loopback. The browser only picks an
-action name; paths are a fixed table in `app/main.py` (`restart_game`,
-`exit_game`, `reboot`, plus one `pad_*` per controller button). There is no
-shutdown action on purpose: nothing here can power a console back on.
+With verified TLS enabled, the agent keeps an authenticated WebSocket open at
+`/api/agent/ws` and runs pushed commands through webMAN's own HTTP server on
+the console's loopback. Old configurations still use `/api/agent/poll`, and a
+TLS-enabled agent falls back to verified HTTPS polling if WebSocket setup
+fails. The browser only picks an action name; paths are a fixed table in
+`app/main.py` (`restart_game`, `exit_game`, `reboot`, plus one `pad_*` per
+controller button). There is no shutdown action on purpose: nothing here can
+power a console back on.
 `restart_game` is the unattended plugin-update round trip:
 `/xmb.ps3$exit;/wait.ps3?xmb;/wait.ps3?5;/pad.ps3?cross`.
 
@@ -173,36 +176,42 @@ revisions share `SCEEXE001`.
 
 The **Files** tab is a file manager over the same channel. It lists any
 directory on the console and downloads any file out of it — both hold the
-operator's request open until the cabinet answers, since delivery rides on the
-held poll. It also replaces exactly three files: the Taiko plugin
+operator's request open until the cabinet answers over WSS or the fallback
+poll. It can replace four fixed files: the Taiko plugin
 (`plugins/taiko/zucchini.sprx`), its config (`plugins/taiko/taiko_config.cfg`),
-and the VSH agent itself (`plugins/zucchini_agent.sprx`).
+the VSH agent itself (`plugins/zucchini_agent.sprx`), and a firmware update
+staged at `/dev_hdd0/updater/01/PS3UPDAT.PUP`.
 
-The connector never sends a destination path — only one of those three kinds
+The connector never sends a destination path — only one of those four kinds
 (`agents.PUSH_KINDS`), with the paths living in the agent's own table. The
 agent's config is in neither table on purpose: it holds the connector address
 and the token used to reach it, so a bad push there would sever the one link
 left for fixing a broken cabinet. Both sides check the `SCE\0` header before an
-SPRX is installed, and the console renames it into place only once the whole
-file has arrived.
+SPRX is installed. Firmware is copied without format checks because the PS3
+updater is authoritative for package validity. The agent creates the updater
+and `01` directories if needed, renames the completed file into place, and
+sets it to mode `0777`.
 
 - **Transport**: outbound only, so cabinets behind NAT need no forwarding.
-  webMAN has no TLS, so this route gets its **own plain-HTTP listener** on
-  `AGENT_PORT` (default 8080) serving only authenticated `/api/agent/*` routes
-  — the UI, its cookies, and the catalog stay on HTTPS. Keep the agent port on
-  the arcade LAN.
+  Current agents use the Connector's normal verified HTTPS/WSS route. During
+  migration, `CONNECTOR_AGENT_PORT` defaults to `8080` and also starts the
+  restricted plain-HTTP `/api/agent/*` listener for older agents. Keep that
+  port on the arcade LAN. Set `CONNECTOR_AGENT_PORT=0` only after every remote
+  cabinet has upgraded, rebooted, and proven that it reconnects through
+  HTTPS; doing it earlier removes the rollback channel.
 - **Credential**: a dedicated `AGENT_TOKEN`, generated once into
   `storage/agent_token`. Deliberately *not* the catalog/API token, which also
-  mints TaikOnline cards: the agent token crosses the LAN in clear and is
-  stored on every cabinet's disk. The connector provisions it automatically —
+  mints TaikOnline cards. It is protected in transit by WSS/HTTPS, while the
+  legacy HTTP migration port must remain private to the arcade LAN. The token
+  is stored on every cabinet's disk. The connector provisions it automatically —
   when a cabinet reports a `network.agent_token` that differs, the value is
   queued through the normal config channel, the plugin saves it, and the agent
   picks it up on its next config reload. No operator step.
 - **Presence**: `agent_online` / `agent_state` on the cabinet record, available
   even while the cabinet's own control socket is down. The connector logs one
   line when an agent comes online.
-- **Console health**: temperatures ride on every poll (`cpu_temp`, `rsx_temp`,
-  `fan`) from lv2's sensor syscalls, and every fourth poll the agent relays
+- **Console health**: temperatures ride on each 20-second WSS status frame (or
+  legacy poll) from lv2's sensor syscalls, and roughly every two minutes the agent relays
   webMAN's own `/cpursx.ps3` page verbatim to `/api/agent/health`. The
   connector strips the markup and reads fan speed, free memory, HDD space, RSX
   clocks, firmware and the lifetime counters off it — several of those sit
@@ -210,6 +219,14 @@ file has arrived.
   Poll readings win where both have a value. Held in memory only: a reading is
   worthless once it is stale. Every field is optional, and the stripped page is
   kept so the panel can show whatever the parser did not recognise.
+- **ProDG/TTY tunnel**: the Console panel has an explicit debug switch for DEX
+  cabinets connected over WSS. While enabled, Connector listens on its host's
+  `127.0.0.1:1000` and carries one ProDG/DECI3 TCP stream as binary WebSocket
+  frames to the console's own port 1000. Docker publishes that port on
+  loopback only. For a remote Connector, first run
+  `ssh -N -L 1000:127.0.0.1:1000 user@connector-host`, then point Target
+  Manager at `127.0.0.1`. The listener is closed by default and is separate
+  from the Connector control panel's network exposure.
 - **Screenshots**: one button, route chosen server-side. The plugin captures a
   running game (webMAN refuses to while a game plays); the agent captures the
   XMB (the plugin is dead then). Agent capture needs a webMAN built with
