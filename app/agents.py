@@ -47,13 +47,15 @@ class PushTarget:
 # which is where the destination paths actually live — the connector never
 # sends a path, only one of these names.
 #
-# The agent's own config is deliberately not here and not there: it holds the
-# connector address and the token used to reach it, so a bad push to it is the
-# one mistake that could not then be undone remotely.
+# Destination paths stay agent-owned so the connector can never turn a file
+# upload into an arbitrary console write. The agent config is intentionally a
+# separate kind from the Taiko config: it controls this channel itself, so the
+# UI can give it a correspondingly strong warning.
 PUSH_KINDS: dict[str, PushTarget] = {
     "agent": PushTarget(b"SCE\0", 1, 32 * 1024 * 1024),
     "mod": PushTarget(b"SCE\0", 1, 32 * 1024 * 1024),
     "config": PushTarget(None, 1, 32 * 1024 * 1024),
+    "agent_config": PushTarget(None, 1, 32 * 1024 * 1024),
     # Firmware validity is authoritative only when the PS3 updater parses it.
     "firmware": PushTarget(None, 1, 512 * 1024 * 1024),
 }

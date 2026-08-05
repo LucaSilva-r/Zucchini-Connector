@@ -262,18 +262,83 @@ export async function downloadConsoleFile(token: string, cabinetId: string, path
 }
 
 /** The fixed files a cabinet will accept. Not a path: the destination lives
- *  in the agent's own table, and the agent's config is not in it. */
-export type PushKind = "agent" | "mod" | "config" | "firmware";
+ *  in the agent's own table. */
+export type PushKind = "agent" | "mod" | "config" | "agent_config" | "firmware";
 
-export const pushConsoleFile = (token: string, cabinetId: string, kind: PushKind, file: File) => {
+type PushResult = {
+  status: string;
+  kind: string;
+  bytes: number;
+  downloaded?: number;
+  detail?: string;
+};
+type PushProgress = (percent: number, phase: "upload" | "download") => void;
+const FIRMWARE_CHUNK_BYTES = 16 * 1024 * 1024;
+
+function firmwareUploadId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+export const pushConsoleFile = async (
+  token: string,
+  cabinetId: string,
+  kind: PushKind,
+  file: File,
+  onProgress?: PushProgress,
+) => {
+  if (kind === "firmware") {
+    if (!file.size) throw new Error("File is empty");
+    const uploadId = firmwareUploadId();
+    let result: PushResult = { status: "uploading", kind, bytes: 0 };
+    for (let offset = 0; offset < file.size; offset += FIRMWARE_CHUNK_BYTES) {
+      const end = Math.min(offset + FIRMWARE_CHUNK_BYTES, file.size);
+      const params = new URLSearchParams({
+        kind,
+        upload_id: uploadId,
+        offset: String(offset),
+        total: String(file.size),
+      });
+      result = await apiRequest<PushResult>(
+        token,
+        `/cabinets/${cabinetId}/fs/push-chunk?${params}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: file.slice(offset, end),
+        },
+      );
+      onProgress?.(Math.round((end / file.size) * 100), "upload");
+    }
+    onProgress?.(0, "download");
+    while (result.status === "queued" || result.status === "downloading") {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      result = await apiRequest<PushResult>(
+        token,
+        `/cabinets/${cabinetId}/fs/push-status?upload_id=${uploadId}`,
+      );
+      onProgress?.(
+        Math.round(((result.downloaded ?? 0) / Math.max(result.bytes, 1)) * 100),
+        "download",
+      );
+    }
+    if (result.status === "failed") {
+      throw new Error(result.detail || "The console did not finish the firmware transfer");
+    }
+    return result;
+  }
+
   const body = new FormData();
   body.append("kind", kind);
   body.append("file", file, file.name);
-  return apiRequest<{ status: string; kind: string; bytes: number }>(
+  const result = await apiRequest<PushResult>(
     token,
     `/cabinets/${cabinetId}/fs/push`,
     { method: "POST", body },
   );
+  onProgress?.(100, "upload");
+  return result;
 };
 
 export const resyncCabinet = (token: string, cabinetId: string) =>

@@ -30,6 +30,8 @@ class RouteBoundaryTests(unittest.TestCase):
             ("POST", "/api/ui/library/upload/osz"),
             ("PUT", "/api/ui/cabinets/{cabinet_id}/selection"),
             ("PUT", "/api/ui/cabinets/{cabinet_id}/config"),
+            ("POST", "/api/ui/cabinets/{cabinet_id}/fs/push-chunk"),
+            ("GET", "/api/ui/cabinets/{cabinet_id}/fs/push-status"),
             ("POST", "/api/ui/cabinets/{cabinet_id}/itaiko/{index}/read"),
             ("PUT", "/api/ui/cabinets/{cabinet_id}/itaiko/{index}/settings"),
         }

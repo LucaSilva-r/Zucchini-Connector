@@ -45,11 +45,19 @@
       note: "The plugin doing this transfer. Takes effect on the next reboot.",
     },
     {
+      kind: "agent_config",
+      label: "webMAN agent config",
+      path: "/dev_hdd0/plugins/zucchini_agent.cfg",
+      accept: ".cfg,.txt",
+      note: "Requires an agent with agent_config support. Applies within 15 seconds; bad connection settings can disconnect it.",
+      capability: "agentconfig01",
+    },
+    {
       kind: "firmware",
       label: "PS3 firmware",
       path: "/dev_hdd0/updater/01/PS3UPDAT.PUP",
       accept: ".PUP,.pup",
-      note: "The PS3 updater performs firmware validation. Use the Connector origin through an SSH tunnel if Cloudflare rejects the 200+ MiB upload.",
+      note: "Stages PS3UPDAT.PUP only; it does not start the system update. The PS3 updater performs validation.",
       capability: "firmware01",
     },
   ];
@@ -58,6 +66,8 @@
   let listing = $state<ConsoleListing | null>(null);
   let loading = $state(false);
   let busy = $state("");
+  let uploadProgress = $state(0);
+  let uploadPhase = $state<"upload" | "download">("upload");
   let error = $state("");
   let notice = $state("");
 
@@ -98,15 +108,29 @@
     const file = input.files?.[0];
     if (!file) return;
     busy = kind;
+    uploadProgress = 0;
+    uploadPhase = "upload";
     error = "";
     notice = "";
     try {
-      const result = await pushConsoleFile(token, cabinet.cabinet_id, kind, file);
-      notice = `Installed ${file.name} (${formatSize(result.bytes)}) on the cabinet.`;
+      const result = await pushConsoleFile(
+        token,
+        cabinet.cabinet_id,
+        kind,
+        file,
+        (percent, phase) => {
+          uploadProgress = percent;
+          uploadPhase = phase;
+        },
+      );
+      notice = kind === "firmware"
+        ? `Staged ${file.name} (${formatSize(result.bytes)}) on the cabinet.`
+        : `Installed ${file.name} (${formatSize(result.bytes)}) on the cabinet.`;
     } catch (reason) {
       error = reason instanceof Error ? reason.message : String(reason);
     } finally {
       busy = "";
+      uploadProgress = 0;
       input.value = "";
     }
   }
@@ -221,8 +245,8 @@
       <h3 class="text-sm font-semibold">Replace a file</h3>
       <p class="mt-0.5 text-xs text-muted-foreground">
         These destinations are fixed in the agent — the connector sends the file, never the path.
-        The agent's own config is deliberately not replaceable: it holds the address and token this
-        link runs on, so a bad push there could not be undone remotely.
+        Take special care with the webMAN agent config: it holds the address and token this link runs on,
+        so bad connection settings may require local recovery.
       </p>
     </div>
     <div class="grid gap-2">
@@ -245,7 +269,14 @@
               class="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium hover:bg-muted aria-disabled:pointer-events-none aria-disabled:opacity-50"
               aria-disabled={!cabinet.agent_online || busy !== "" || !!target.capability && !cabinet.agent_capabilities.includes(target.capability)}
             >
-              <UploadIcon class="size-4" /> {busy === target.kind ? "Sending…" : "Upload"}
+              <UploadIcon class="size-4" />
+              {busy === target.kind
+                ? target.kind === "firmware"
+                  ? uploadPhase === "upload"
+                    ? `Connector ${uploadProgress}%…`
+                    : `Console ${uploadProgress}%…`
+                  : "Installing…"
+                : "Upload"}
             </span>
           </label>
         </div>

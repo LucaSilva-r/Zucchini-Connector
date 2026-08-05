@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Thread
 
 from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import agents, auth, cabinets, catalog, control, converter, database, debug_tunnel, library_admin, updates
@@ -282,6 +282,12 @@ async def agent_upload(request: Request, id: str = "", kind: str = "") -> dict[s
 
 FS_LIST_TIMEOUT = 45
 FS_TRANSFER_TIMEOUT = 300
+# Browser-to-connector firmware requests stay comfortably below Cloudflare's
+# request-body limits. The complete PUP is still capped by its PushTarget.
+FIRMWARE_UPLOAD_CHUNK_BYTES = 20 * 1024 * 1024
+_firmware_transfer_jobs: dict[tuple[str, str], dict[str, object]] = {}
+_firmware_transfer_tasks: set[asyncio.Task[None]] = set()
+_active_firmware_transfers: dict[str, str] = {}
 
 
 def _safe_id(cabinet_id: str) -> str:
@@ -298,6 +304,19 @@ def _push_path(cabinet_id: str, kind: str) -> Path:
     if kind not in agents.PUSH_KINDS:
         raise HTTPException(status_code=400, detail="Unknown push target")
     return settings.cabinets_root / "uploads" / _safe_id(cabinet_id) / f"push-{kind}.bin"
+
+
+def _chunk_upload_path(cabinet_id: str, upload_id: str) -> Path:
+    if not (16 <= len(upload_id) <= 64) or any(
+        character not in "0123456789abcdefABCDEF" for character in upload_id
+    ):
+        raise HTTPException(status_code=400, detail="Invalid upload id")
+    return (
+        settings.cabinets_root
+        / "uploads"
+        / _safe_id(cabinet_id)
+        / f"firmware-upload-{upload_id}.part"
+    )
 
 
 async def _stream_to_file(request: Request, path: Path, limit: int) -> int:
@@ -353,12 +372,34 @@ async def agent_file(
 
 
 @agent_api.get("/blob", dependencies=[Depends(require_agent_token)])
-def agent_blob(id: str = "", kind: str = "") -> Response:
+async def agent_blob(id: str = "", kind: str = "") -> Response:
     """Serve the staged file for a `put`. The agent asks by kind, never by
     path — the destinations live in the agent's own table."""
     path = _push_path(id, kind)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Nothing staged for that cabinet")
+    if kind == "firmware" and (upload_id := _active_firmware_transfers.get(id)):
+        key = (id, upload_id)
+        total = path.stat().st_size
+
+        async def chunks():
+            downloaded = 0
+            job = _firmware_transfer_jobs.get(key)
+            if job is not None:
+                job["status"] = "downloading"
+            with path.open("rb") as fh:
+                while chunk := fh.read(256 * 1024):
+                    yield chunk
+                    downloaded += len(chunk)
+                    job = _firmware_transfer_jobs.get(key)
+                    if job is not None:
+                        job["downloaded"] = downloaded
+
+        return StreamingResponse(
+            chunks(),
+            media_type="application/octet-stream",
+            headers={"Content-Length": str(total), "Cache-Control": "no-store"},
+        )
     return FileResponse(path, media_type="application/octet-stream")
 
 
@@ -455,6 +496,117 @@ async def _stage_push(
     return total
 
 
+async def _append_firmware_chunk(
+    request: Request, path: Path, offset: int, total: int
+) -> int:
+    """Append one bounded raw-body chunk and return the assembled size."""
+    target = agents.PUSH_KINDS["firmware"]
+    if offset < 0 or total < target.min_bytes or total > target.max_bytes or offset >= total:
+        raise HTTPException(status_code=400, detail="Invalid firmware upload range")
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > FIRMWARE_UPLOAD_CHUNK_BYTES:
+        raise HTTPException(status_code=413, detail="Firmware upload chunk is too large")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = path.stat().st_size if path.is_file() else 0
+    if offset == 0:
+        current = 0
+    elif current != offset:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Firmware upload offset mismatch (server has {current} bytes)",
+        )
+
+    received = 0
+    mode = "r+b" if path.is_file() else "w+b"
+    with path.open(mode) as fh:
+        fh.seek(current)
+        fh.truncate()
+        try:
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > FIRMWARE_UPLOAD_CHUNK_BYTES or current + received > total:
+                    raise HTTPException(status_code=413, detail="Firmware upload chunk is too large")
+                fh.write(chunk)
+        except BaseException:
+            fh.seek(current)
+            fh.truncate()
+            raise
+    if not received:
+        raise HTTPException(status_code=400, detail="Firmware upload chunk is empty")
+    return current + received
+
+
+async def _deliver_staged_push(
+    cabinet_id: str, kind: str, size: int
+) -> dict[str, object]:
+    agents.hub.arm(cabinet_id, "put")
+    if not agents.hub.enqueue(cabinet_id, agents.push_command(kind)):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    transfer_timeout = 30 * 60 if kind == "firmware" else FS_TRANSFER_TIMEOUT
+    result = await agents.hub.collect(cabinet_id, "put", transfer_timeout)
+    if result is None:
+        raise HTTPException(status_code=504, detail="The cabinet did not answer")
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail="The console refused the file")
+    outcome = "staged" if kind == "firmware" else "installed"
+    print(f"[connector] {outcome} {kind} on {cabinet_id}: {size} bytes", flush=True)
+    return {"status": outcome, "kind": kind, "bytes": size}
+
+
+async def _finish_firmware_transfer(
+    cabinet_id: str, upload_id: str, size: int
+) -> None:
+    key = (cabinet_id, upload_id)
+    result = await agents.hub.collect(cabinet_id, "put", 30 * 60)
+    if result is None:
+        _firmware_transfer_jobs[key] = {
+            "status": "failed",
+            "kind": "firmware",
+            "bytes": size,
+            "downloaded": _firmware_transfer_jobs.get(key, {}).get("downloaded", 0),
+            "detail": "The cabinet did not confirm the firmware transfer",
+        }
+    elif not result.get("ok"):
+        _firmware_transfer_jobs[key] = {
+            "status": "failed",
+            "kind": "firmware",
+            "bytes": size,
+            "downloaded": _firmware_transfer_jobs.get(key, {}).get("downloaded", 0),
+            "detail": "The console could not stage the firmware file",
+        }
+    else:
+        _firmware_transfer_jobs[key] = {
+            "status": "staged",
+            "kind": "firmware",
+            "bytes": size,
+            "downloaded": size,
+        }
+        print(f"[connector] staged firmware on {cabinet_id}: {size} bytes", flush=True)
+    if _active_firmware_transfers.get(cabinet_id) == upload_id:
+        _active_firmware_transfers.pop(cabinet_id, None)
+
+
+def _start_firmware_transfer(
+    cabinet_id: str, upload_id: str, size: int
+) -> dict[str, object]:
+    agents.hub.arm(cabinet_id, "put")
+    if not agents.hub.enqueue(cabinet_id, agents.push_command("firmware")):
+        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
+    result: dict[str, object] = {
+        "status": "queued",
+        "kind": "firmware",
+        "bytes": size,
+        "downloaded": 0,
+    }
+    _firmware_transfer_jobs[(cabinet_id, upload_id)] = result
+    _active_firmware_transfers[cabinet_id] = upload_id
+    task = asyncio.create_task(_finish_firmware_transfer(cabinet_id, upload_id, size))
+    _firmware_transfer_tasks.add(task)
+    task.add_done_callback(_firmware_transfer_tasks.discard)
+    return result
+
+
 @ui_api.post("/cabinets/{cabinet_id}/fs/push", dependencies=[Depends(auth.require_management)])
 async def cabinet_fs_push(
     cabinet_id: str, kind: str = Form(...), file: UploadFile = File(...)
@@ -462,7 +614,7 @@ async def cabinet_fs_push(
     """Replace one of the fixed files a cabinet will accept.
 
     `kind` is never a path: agents.PUSH_KINDS and the agent's own table decide
-    where each one lands, and the agent's config is in neither.
+    where each one lands.
     """
     if cabinets.load(cabinet_id) is None:
         raise HTTPException(status_code=404, detail="Cabinet not found")
@@ -473,23 +625,67 @@ async def cabinet_fs_push(
             status_code=409,
             detail="This cabinet needs the firmware-capable agent upgrade first",
         )
+    if kind == "agent_config" and not agents.hub.supports(cabinet_id, "agentconfig01"):
+        raise HTTPException(
+            status_code=409,
+            detail="This cabinet needs the agent-config-capable upgrade first",
+        )
     staged = _push_path(cabinet_id, kind)
     try:
         size = await _stage_push(file, staged, agents.PUSH_KINDS[kind])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    agents.hub.arm(cabinet_id, "put")
-    if not agents.hub.enqueue(cabinet_id, agents.push_command(kind)):
-        raise HTTPException(status_code=409, detail="Cabinet VSH agent is offline")
-    transfer_timeout = 30 * 60 if kind == "firmware" else FS_TRANSFER_TIMEOUT
-    result = await agents.hub.collect(cabinet_id, "put", transfer_timeout)
+    return await _deliver_staged_push(cabinet_id, kind, size)
+
+
+@ui_api.post(
+    "/cabinets/{cabinet_id}/fs/push-chunk",
+    dependencies=[Depends(auth.require_management)],
+)
+async def cabinet_fs_push_chunk(
+    cabinet_id: str,
+    request: Request,
+    kind: str,
+    upload_id: str,
+    offset: int,
+    total: int,
+) -> dict[str, object]:
+    """Assemble small firmware requests before asking the cabinet to fetch."""
+    if cabinets.load(cabinet_id) is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if kind != "firmware":
+        raise HTTPException(status_code=400, detail="Only firmware uses chunked upload")
+    if not agents.hub.supports(cabinet_id, "firmware01"):
+        raise HTTPException(
+            status_code=409,
+            detail="This cabinet needs the firmware-capable agent upgrade first",
+        )
+
+    partial = _chunk_upload_path(cabinet_id, upload_id)
+    size = await _append_firmware_chunk(request, partial, offset, total)
+    if size < total:
+        return {"status": "uploading", "kind": kind, "bytes": size}
+
+    staged = _push_path(cabinet_id, kind)
+    await asyncio.to_thread(os.replace, partial, staged)
+    # Only now, after every chunk has been assembled and atomically promoted,
+    # may the agent receive the command that starts its console-side download.
+    return _start_firmware_transfer(cabinet_id, upload_id, size)
+
+
+@ui_api.get(
+    "/cabinets/{cabinet_id}/fs/push-status",
+    dependencies=[Depends(auth.require_management)],
+)
+async def cabinet_fs_push_status(cabinet_id: str, upload_id: str) -> dict[str, object]:
+    _chunk_upload_path(cabinet_id, upload_id)  # validates the opaque id
+    result = _firmware_transfer_jobs.get((cabinet_id, upload_id))
     if result is None:
-        raise HTTPException(status_code=504, detail="The cabinet did not answer")
-    if not result.get("ok"):
-        raise HTTPException(status_code=502, detail="The console refused the file")
-    print(f"[connector] pushed {kind} to {cabinet_id}: {size} bytes", flush=True)
-    return {"status": "installed", "kind": kind, "bytes": size}
+        raise HTTPException(status_code=404, detail="Firmware upload not found")
+    if result["status"] in {"staged", "failed"}:
+        _firmware_transfer_jobs.pop((cabinet_id, upload_id), None)
+    return result
 
 
 @cabinet_api.post("/cabinet/screenshot", dependencies=[Depends(require_token)])

@@ -1,8 +1,7 @@
 """File manager: what the agent may be asked for, and what it may be handed.
 
 The write side is the part worth a test. The connector never sends a
-destination path — only a kind — and the agent's config is not one of them,
-because that file holds the address and token the connector is reached at.
+destination path — only a kind — including for the agent's own config.
 """
 
 from __future__ import annotations
@@ -45,12 +44,13 @@ class ConsolePathTests(unittest.TestCase):
 class PushTargetTests(unittest.TestCase):
     def test_only_fixed_kinds_exist(self) -> None:
         self.assertEqual(
-            set(agents.PUSH_KINDS), {"agent", "mod", "config", "firmware"}
+            set(agents.PUSH_KINDS),
+            {"agent", "mod", "config", "agent_config", "firmware"},
         )
 
-    def test_the_agent_config_is_not_a_push_target(self) -> None:
-        """The one file that could sever the link back to the cabinet."""
-        for kind in ("agent_config", "agent-cfg", "zucchini_agent.cfg", ""):
+    def test_the_agent_config_has_a_fixed_push_target(self) -> None:
+        self.assertEqual(agents.push_command("agent_config"), "put\tagent_config")
+        for kind in ("agent-cfg", "zucchini_agent.cfg", ""):
             with self.assertRaises(ValueError):
                 agents.push_command(kind)
 
@@ -137,6 +137,8 @@ class FileManagerRouteTests(unittest.IsolatedAsyncioTestCase):
 class PushRouteTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         agents.hub = agents.AgentHub()
+        main._firmware_transfer_jobs.clear()
+        main._active_firmware_transfers.clear()
         _cabinet("files02")
 
     async def _push(self, kind: str, body: bytes):
@@ -151,6 +153,8 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
         agents.hub.note_seen("files02", "xmb")
         if kind == "firmware":
             agents.hub.note_capabilities("files02", "firmware01")
+        elif kind == "agent_config":
+            agents.hub.note_capabilities("files02", "agentconfig01")
         task = asyncio.create_task(main.cabinet_fs_push("files02", kind, _Upload()))
         await asyncio.sleep(0.05)
         return task
@@ -171,7 +175,73 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
         agents.hub.note_result(
             "files02", "put", {"kind": "firmware", "ok": True, "size": 19}
         )
-        self.assertEqual((await task)["status"], "installed")
+        self.assertEqual((await task)["status"], "staged")
+
+    async def test_firmware_can_be_uploaded_in_sequential_chunks(self) -> None:
+        class _Request:
+            headers: dict[str, str] = {}
+
+            def __init__(self, body: bytes) -> None:
+                self.body = body
+
+            async def stream(self):
+                yield self.body
+
+        agents.hub.note_seen("files02", "xmb")
+        agents.hub.note_capabilities("files02", "firmware01")
+        upload_id = "0123456789abcdef0123456789abcdef"
+        first = await main.cabinet_fs_push_chunk(
+            "files02", _Request(b"first "), "firmware", upload_id, 0, 12
+        )
+        self.assertEqual(first, {"status": "uploading", "kind": "firmware", "bytes": 6})
+        self.assertEqual(agents.hub._pending.get("files02"), None)
+
+        final = await main.cabinet_fs_push_chunk(
+            "files02", _Request(b"second"), "firmware", upload_id, 6, 12
+        )
+        self.assertEqual(final["status"], "queued")
+        self.assertEqual(
+            await asyncio.wait_for(agents.hub.wait("files02"), timeout=1),
+            ["put\tfirmware"],
+        )
+        self.assertEqual(main._push_path("files02", "firmware").read_bytes(), b"first second")
+
+        response = await main.agent_blob("files02", "firmware")
+        downloaded = b""
+        async for chunk in response.body_iterator:
+            downloaded += chunk
+        self.assertEqual(downloaded, b"first second")
+        progress = await main.cabinet_fs_push_status("files02", upload_id)
+        self.assertEqual(progress["status"], "downloading")
+        self.assertEqual(progress["downloaded"], 12)
+
+        agents.hub.note_result(
+            "files02", "put", {"kind": "firmware", "ok": True, "size": 12}
+        )
+        await asyncio.gather(*list(main._firmware_transfer_tasks))
+        self.assertEqual(
+            (await main.cabinet_fs_push_status("files02", upload_id))["status"],
+            "staged",
+        )
+
+    async def test_firmware_chunk_offset_must_match_assembled_file(self) -> None:
+        class _Request:
+            headers: dict[str, str] = {}
+
+            async def stream(self):
+                yield b"chunk"
+
+        agents.hub.note_seen("files02", "xmb")
+        agents.hub.note_capabilities("files02", "firmware01")
+        upload_id = "abcdef0123456789abcdef0123456789"
+        await main.cabinet_fs_push_chunk(
+            "files02", _Request(), "firmware", upload_id, 0, 10
+        )
+        with self.assertRaises(HTTPException) as raised:
+            await main.cabinet_fs_push_chunk(
+                "files02", _Request(), "firmware", upload_id, 4, 10
+            )
+        self.assertEqual(raised.exception.status_code, 409)
 
     async def test_old_agent_cannot_receive_the_firmware_command(self) -> None:
         agents.hub.note_seen("files02", "xmb")
@@ -182,6 +252,17 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(HTTPException) as raised:
             await main.cabinet_fs_push("files02", "firmware", _Upload())
+        self.assertEqual(raised.exception.status_code, 409)
+
+    async def test_old_agent_cannot_receive_its_config(self) -> None:
+        agents.hub.note_seen("files02", "xmb")
+
+        class _Upload:
+            async def read(self, _size: int) -> bytes:
+                return b"connector_host = 10.0.0.2\n"
+
+        with self.assertRaises(HTTPException) as raised:
+            await main.cabinet_fs_push("files02", "agent_config", _Upload())
         self.assertEqual(raised.exception.status_code, 409)
 
     async def test_a_signed_sprx_is_staged_and_the_console_told_to_take_it(self) -> None:
@@ -202,6 +283,18 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
         agents.hub.note_result("files02", "put", {"kind": "config", "ok": True, "size": 34})
         self.assertEqual((await task)["status"], "installed")
 
+    async def test_the_agent_config_kind_needs_no_sce_header(self) -> None:
+        body = b"connector_host = 10.0.0.2\nagent_token = replacement\n"
+        task = await self._push("agent_config", body)
+        self.assertEqual(
+            await asyncio.wait_for(agents.hub.wait("files02"), timeout=1),
+            ["put\tagent_config"],
+        )
+        agents.hub.note_result(
+            "files02", "put", {"kind": "agent_config", "ok": True, "size": len(body)}
+        )
+        self.assertEqual((await task)["status"], "installed")
+
     async def test_a_console_that_refuses_the_file_is_not_reported_as_installed(self) -> None:
         task = await self._push("mod", b"SCE\0" + b"\x00" * 64)
         await asyncio.wait_for(agents.hub.wait("files02"), timeout=1)
@@ -210,9 +303,9 @@ class PushRouteTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(raised.exception.status_code, 502)
 
-    async def test_the_agent_config_cannot_be_pushed(self) -> None:
+    async def test_unknown_config_alias_cannot_be_pushed(self) -> None:
         with self.assertRaises(HTTPException) as raised:
-            await (await self._push("agent_config", b"anything"))
+            await (await self._push("agent-cfg", b"anything"))
         self.assertEqual(raised.exception.status_code, 400)
 
 
@@ -276,8 +369,17 @@ class AgentWireTests(unittest.IsolatedAsyncioTestCase):
             {"kind": "mod", "ok": True, "size": 11},
         )
 
-    def test_no_blob_is_served_for_the_agent_config(self) -> None:
-        for kind in ("agent_config", "cfg", "../zucchini_agent.cfg"):
+    def test_agent_config_blob_is_served_only_by_its_kind(self) -> None:
+        staged = main._push_path("wire01", "agent_config")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"connector_host = 10.0.0.2\n")
+        response = self.client.get(
+            "/api/agent/blob?id=wire01&kind=agent_config", headers=self.auth
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"connector_host = 10.0.0.2\n")
+
+        for kind in ("cfg", "../zucchini_agent.cfg"):
             response = self.client.get(
                 f"/api/agent/blob?id=wire01&kind={kind}", headers=self.auth
             )

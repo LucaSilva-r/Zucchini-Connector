@@ -177,20 +177,27 @@ revisions share `SCEEXE001`.
 The **Files** tab is a file manager over the same channel. It lists any
 directory on the console and downloads any file out of it — both hold the
 operator's request open until the cabinet answers over WSS or the fallback
-poll. It can replace four fixed files: the Taiko plugin
+poll. It can replace five fixed files: the Taiko plugin
 (`plugins/taiko/zucchini.sprx`), its config (`plugins/taiko/taiko_config.cfg`),
-the VSH agent itself (`plugins/zucchini_agent.sprx`), and a firmware update
-staged at `/dev_hdd0/updater/01/PS3UPDAT.PUP`.
+the VSH agent itself (`plugins/zucchini_agent.sprx`), the agent's config
+(`plugins/zucchini_agent.cfg`), and a firmware update staged at
+`/dev_hdd0/updater/01/PS3UPDAT.PUP`.
 
-The connector never sends a destination path — only one of those four kinds
+The connector never sends a destination path — only one of those five kinds
 (`agents.PUSH_KINDS`), with the paths living in the agent's own table. The
-agent's config is in neither table on purpose: it holds the connector address
-and the token used to reach it, so a bad push there would sever the one link
-left for fixing a broken cabinet. Both sides check the `SCE\0` header before an
-SPRX is installed. Firmware is copied without format checks because the PS3
-updater is authoritative for package validity. The agent creates the updater
-and `01` directories if needed, renames the completed file into place, and
-sets it to mode `0777`.
+agent config holds the connector address and authentication token, so the UI
+warns that a bad push can sever the remote-management link and require local
+recovery. This target requires an agent build that accepts `put agent_config`;
+older agents must be upgraded and rebooted first. Both sides check the `SCE\0`
+header before an SPRX is installed.
+Firmware is copied without format checks because the PS3 updater is
+authoritative for package validity. The agent creates the updater and `01`
+directories if needed, renames the completed file into place, and sets it to
+mode `0777`. The browser sends firmware to the Connector in sequential 16 MiB
+requests, and only after the complete PUP has been assembled does the Connector
+tell the cabinet to download it. The dashboard reports both transfer phases.
+This only stages `PS3UPDAT.PUP`; it does not start a system update or claim to
+know whether Sony's updater later installs it.
 
 - **Transport**: outbound only, so cabinets behind NAT need no forwarding.
   Current agents use the Connector's normal verified HTTPS/WSS route. During
